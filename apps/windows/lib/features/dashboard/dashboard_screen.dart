@@ -193,6 +193,14 @@ class _ReceiverCard extends StatelessWidget {
               label: 'Maximum concurrent transfers',
               value: '${controller.settingsSnapshot.appSettings.maximumConcurrentTransfers}',
             ),
+            const SizedBox(height: 12),
+            _InfoRow(
+              icon: Icons.power_settings_new_outlined,
+              label: 'Start with Windows',
+              value: controller.settingsSnapshot.appSettings.startWithWindows
+                  ? 'Enabled'
+                  : 'Disabled',
+            ),
             const SizedBox(height: 14),
             Align(
               alignment: Alignment.centerLeft,
@@ -258,6 +266,7 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
   late final TextEditingController _portController;
   late final TextEditingController _maxFileSizeController;
   late final TextEditingController _maxConcurrentTransfersController;
+  late bool _startWithWindows;
   late bool _minimizeToTray;
   late bool _showNotifications;
   String? _error;
@@ -277,6 +286,7 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
     _maxConcurrentTransfersController = TextEditingController(
       text: '${widget.settings.maximumConcurrentTransfers}',
     );
+    _startWithWindows = widget.settings.startWithWindows;
     _minimizeToTray = widget.settings.minimizeToTray;
     _showNotifications = widget.settings.showNotifications;
   }
@@ -359,6 +369,7 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         listenPort: port,
         maximumFileSizeBytes: maxFileSizeMb * 1024 * 1024,
         maximumConcurrentTransfers: maxConcurrentTransfers,
+        startWithWindows: _startWithWindows,
         minimizeToTray: _minimizeToTray,
         showNotifications: _showNotifications,
       ),
@@ -427,6 +438,15 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 keyboardType: TextInputType.number,
               ),
               const SizedBox(height: 8),
+              CheckboxListTile(
+                value: _startWithWindows,
+                onChanged: (value) {
+                  setState(() => _startWithWindows = value ?? false);
+                },
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Start with Windows'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
               CheckboxListTile(
                 value: _minimizeToTray,
                 onChanged: (value) {

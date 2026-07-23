@@ -16,7 +16,10 @@ void main() {
         receiveFolder: 'C:\\SendToPC\\Inbox',
         listenPort: 45999,
         maximumFileSizeBytes: 128 * 1024 * 1024,
+        startWithWindows: true,
         minimizeToTray: false,
+        showNotifications: false,
+        maximumConcurrentTransfers: 3,
       );
 
       await repository.save(
@@ -33,7 +36,10 @@ void main() {
       expect(loaded.appSettings.receiveFolder, 'C:\\SendToPC\\Inbox');
       expect(loaded.appSettings.listenPort, 45999);
       expect(loaded.appSettings.maximumFileSizeBytes, 128 * 1024 * 1024);
+      expect(loaded.appSettings.startWithWindows, isTrue);
       expect(loaded.appSettings.minimizeToTray, isFalse);
+      expect(loaded.appSettings.showNotifications, isFalse);
+      expect(loaded.appSettings.maximumConcurrentTransfers, 3);
     } finally {
       await directory.delete(recursive: true);
     }

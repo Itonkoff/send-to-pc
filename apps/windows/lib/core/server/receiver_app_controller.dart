@@ -4,9 +4,11 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_models/shared_models.dart';
 import 'package:shared_security/shared_security.dart';
 
+import '../notifications/windows_notification_service.dart';
 import '../pairing/pairing_coordinator.dart';
 import '../settings/receiver_settings.dart';
 import '../settings/settings_repository.dart';
+import '../startup/windows_startup_service.dart';
 import '../storage/receive_file_storage.dart';
 import '../utils/network_interfaces.dart';
 import 'paired_device_repository.dart';
@@ -21,6 +23,8 @@ class ReceiverAppController extends ChangeNotifier {
     required this.bootstrapToken,
     required this.storage,
     required this.trustedDevices,
+    required this.notificationService,
+    required this.startupService,
   });
 
   ReceiverSettingsSnapshot settingsSnapshot;
@@ -28,6 +32,8 @@ class ReceiverAppController extends ChangeNotifier {
   final String bootstrapToken;
   final ReceiveFileStorage storage;
   final TrustedDeviceStore trustedDevices;
+  final WindowsNotificationService notificationService;
+  final WindowsStartupService startupService;
 
   late final PairingCoordinator pairingCoordinator;
   late final ReceiverServer server;
@@ -37,6 +43,8 @@ class ReceiverAppController extends ChangeNotifier {
   String _localAddress = '127.0.0.1';
   List<String> _localAddresses = const <String>['127.0.0.1'];
   List<TransferRecord> _records = <TransferRecord>[];
+  final Set<String> _notifiedTransferEvents = <String>{};
+  final Set<String> _notifiedPairingRequestIds = <String>{};
 
   bool get isRunning => server.isRunning;
   Object? get startupError => _startupError;
@@ -80,6 +88,8 @@ class ReceiverAppController extends ChangeNotifier {
       bootstrapToken: token,
       storage: storage,
       trustedDevices: trustedDevices,
+      notificationService: WindowsNotificationService(),
+      startupService: const WindowsStartupService(),
     );
 
     final deviceInfo = DeviceInfo(
@@ -118,10 +128,7 @@ class ReceiverAppController extends ChangeNotifier {
           ? const <String>['127.0.0.1']
           : addresses;
       _localAddress = _localAddresses.first;
-      _recordSubscription = server.recordEvents.listen((_) {
-        _records = server.records;
-        notifyListeners();
-      });
+      _recordSubscription = server.recordEvents.listen(_handleRecordChanged);
       await server.start();
       _records = server.records;
       _startupError = null;
@@ -149,7 +156,60 @@ class ReceiverAppController extends ChangeNotifier {
   }
 
   void _notifyPairingChanged() {
+    _maybeNotifyPairingRequests();
     notifyListeners();
+  }
+
+  void _handleRecordChanged(TransferRecord record) {
+    _records = server.records;
+    _maybeNotifyTransfer(record);
+    notifyListeners();
+  }
+
+  void _maybeNotifyTransfer(TransferRecord record) {
+    if (!settingsSnapshot.appSettings.showNotifications) {
+      return;
+    }
+    final eventKey = '${record.id}:${record.status.jsonName}';
+    if (!_notifiedTransferEvents.add(eventKey)) {
+      return;
+    }
+
+    switch (record.status) {
+      case TransferStatus.pending:
+        unawaited(notificationService.showIncomingTransfer(record));
+        break;
+      case TransferStatus.completed:
+        unawaited(notificationService.showTransferCompleted(record));
+        break;
+      case TransferStatus.failed:
+        unawaited(notificationService.showTransferFailed(record));
+        break;
+      case TransferStatus.connecting:
+      case TransferStatus.uploading:
+      case TransferStatus.uploaded:
+      case TransferStatus.verifying:
+      case TransferStatus.cancelled:
+        break;
+    }
+  }
+
+  void _maybeNotifyPairingRequests() {
+    if (!settingsSnapshot.appSettings.showNotifications) {
+      return;
+    }
+    for (final request in pairingCoordinator.requests) {
+      if (request.status != PairingRequestStatus.pending ||
+          !_notifiedPairingRequestIds.add(request.id)) {
+        continue;
+      }
+      unawaited(
+        notificationService.showPairingRequest(
+          deviceName: request.deviceName,
+          platform: request.platform,
+        ),
+      );
+    }
   }
 
   void createPairingSession() {
@@ -214,6 +274,9 @@ class ReceiverAppController extends ChangeNotifier {
 
     try {
       await settingsRepository.save(nextSnapshot);
+      if (appSettings.startWithWindows != previousSettings.startWithWindows) {
+        await startupService.setEnabled(appSettings.startWithWindows);
+      }
       settingsSnapshot = nextSnapshot;
       server.updateSettings(appSettings);
       if (wasRunning) {
@@ -225,6 +288,13 @@ class ReceiverAppController extends ChangeNotifier {
       settingsSnapshot = previousSnapshot;
       server.updateSettings(previousSettings);
       await settingsRepository.save(previousSnapshot);
+      if (appSettings.startWithWindows != previousSettings.startWithWindows) {
+        try {
+          await startupService.setEnabled(previousSettings.startWithWindows);
+        } on Object {
+          // Keep the original failure visible to the user.
+        }
+      }
       if (wasRunning) {
         try {
           await server.start();
