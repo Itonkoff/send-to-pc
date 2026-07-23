@@ -22,6 +22,12 @@ class DashboardScreen extends StatelessWidget {
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) {
+        final activeRecords = controller.records
+            .where((record) => _isActiveTransferStatus(record.status))
+            .toList(growable: false);
+        final historyRecords = controller.records
+            .where((record) => !_isActiveTransferStatus(record.status))
+            .toList(growable: false);
         return Scaffold(
           appBar: AppBar(
             title: const Text('Send to PC'),
@@ -68,9 +74,16 @@ class DashboardScreen extends StatelessWidget {
                     },
                   ),
                   const SizedBox(height: 20),
+                  _ActiveTransfersCard(
+                    records: activeRecords,
+                    onCancelTransfer: (record) {
+                      unawaited(controller.cancelTransfer(record.id));
+                    },
+                  ),
+                  const SizedBox(height: 20),
                   _TransferHistoryCard(
-                    records: controller.records,
-                    onClear: controller.records.isEmpty
+                    records: historyRecords,
+                    onClear: historyRecords.isEmpty
                         ? null
                         : () {
                             unawaited(
@@ -166,6 +179,28 @@ class _ReceiverCard extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _SettingChip(
+                  icon: Icons.power_settings_new_outlined,
+                  label: 'Startup',
+                  enabled: controller.settingsSnapshot.appSettings.startWithWindows,
+                ),
+                _SettingChip(
+                  icon: Icons.notifications_outlined,
+                  label: 'Notifications',
+                  enabled: controller.settingsSnapshot.appSettings.showNotifications,
+                ),
+                _SettingChip(
+                  icon: Icons.keyboard_hide_outlined,
+                  label: 'Tray',
+                  enabled: controller.settingsSnapshot.appSettings.minimizeToTray,
+                ),
+              ],
+            ),
             const SizedBox(height: 18),
             _InfoRow(
               icon: Icons.folder_outlined,
@@ -193,14 +228,7 @@ class _ReceiverCard extends StatelessWidget {
               label: 'Maximum concurrent transfers',
               value: '${controller.settingsSnapshot.appSettings.maximumConcurrentTransfers}',
             ),
-            const SizedBox(height: 12),
-            _InfoRow(
-              icon: Icons.power_settings_new_outlined,
-              label: 'Start with Windows',
-              value: controller.settingsSnapshot.appSettings.startWithWindows
-                  ? 'Enabled'
-                  : 'Disabled',
-            ),
+
             const SizedBox(height: 14),
             Align(
               alignment: Alignment.centerLeft,
@@ -387,83 +415,108 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              _SettingsSection(
+                title: 'Receiver',
                 children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _receiveFolderController,
-                      decoration: const InputDecoration(
-                        labelText: 'Receive folder',
-                        border: OutlineInputBorder(),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _receiveFolderController,
+                          decoration: const InputDecoration(
+                            labelText: 'Receive folder',
+                            helperText: 'Files are finalized here after verification.',
+                            border: OutlineInputBorder(),
+                          ),
+                          textInputAction: TextInputAction.next,
+                        ),
                       ),
-                      textInputAction: TextInputAction.next,
-                    ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: 'Browse folders',
+                        onPressed: _pickReceiveFolder,
+                        icon: const Icon(Icons.folder_open_outlined),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: 'Browse folders',
-                    onPressed: _pickReceiveFolder,
-                    icon: const Icon(Icons.folder_open_outlined),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _portController,
+                    decoration: const InputDecoration(
+                      labelText: 'Listening port',
+                      helperText: 'Use a free local TCP port between 1 and 65535.',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.next,
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _portController,
-                decoration: const InputDecoration(
-                  labelText: 'Listening port',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: TextInputType.number,
-                textInputAction: TextInputAction.next,
+              const SizedBox(height: 16),
+              _SettingsSection(
+                title: 'Limits',
+                children: [
+                  TextField(
+                    controller: _maxFileSizeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Maximum file size (MB)',
+                      helperText: 'Uploads larger than this are rejected before saving.',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _maxConcurrentTransfersController,
+                    decoration: const InputDecoration(
+                      labelText: 'Maximum concurrent transfers',
+                      helperText: 'Extra senders wait for a free receiver slot.',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _maxFileSizeController,
-                decoration: const InputDecoration(
-                  labelText: 'Maximum file size (MB)',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: TextInputType.number,
-                textInputAction: TextInputAction.next,
+              const SizedBox(height: 16),
+              _SettingsSection(
+                title: 'Startup',
+                children: [
+                  CheckboxListTile(
+                    value: _startWithWindows,
+                    onChanged: (value) {
+                      setState(() => _startWithWindows = value ?? false);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Start with Windows'),
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  CheckboxListTile(
+                    value: _minimizeToTray,
+                    onChanged: (value) {
+                      setState(() => _minimizeToTray = value ?? true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Minimize to system tray'),
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _maxConcurrentTransfersController,
-                decoration: const InputDecoration(
-                  labelText: 'Maximum concurrent transfers',
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: TextInputType.number,
-              ),
-              const SizedBox(height: 8),
-              CheckboxListTile(
-                value: _startWithWindows,
-                onChanged: (value) {
-                  setState(() => _startWithWindows = value ?? false);
-                },
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Start with Windows'),
-                controlAffinity: ListTileControlAffinity.leading,
-              ),
-              CheckboxListTile(
-                value: _minimizeToTray,
-                onChanged: (value) {
-                  setState(() => _minimizeToTray = value ?? true);
-                },
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Minimize to system tray'),
-                controlAffinity: ListTileControlAffinity.leading,
-              ),
-              CheckboxListTile(
-                value: _showNotifications,
-                onChanged: (value) {
-                  setState(() => _showNotifications = value ?? true);
-                },
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Show notifications'),
-                controlAffinity: ListTileControlAffinity.leading,
+              const SizedBox(height: 16),
+              _SettingsSection(
+                title: 'Notifications',
+                children: [
+                  CheckboxListTile(
+                    value: _showNotifications,
+                    onChanged: (value) {
+                      setState(() => _showNotifications = value ?? true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Show notifications'),
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                ],
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -491,6 +544,35 @@ if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
           icon: const Icon(Icons.save_outlined),
           label: const Text('Save'),
         ),
+      ],
+    );
+  }
+}
+
+class _SettingsSection extends StatelessWidget {
+  const _SettingsSection({
+    required this.title,
+    required this.children,
+  });
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: theme.textTheme.labelLarge?.copyWith(
+            color: theme.colorScheme.primary,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 10),
+        ...children,
       ],
     );
   }
@@ -585,76 +667,88 @@ class _PairingCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 18),
-            _InfoRow(
-              icon: Icons.badge_outlined,
-              label: 'Device ID',
-              value: controller.settingsSnapshot.deviceId,
-            ),
-            const SizedBox(height: 12),
-            _InfoRow(
-              icon: Icons.key_outlined,
-              label: 'Test client token',
-              value: controller.bootstrapToken,
-              monospace: true,
-            ),
-            const SizedBox(height: 16),
-            if (payloadText == null)
+            if (payloadText == null) ...[
               Text(
                 'Create a pairing session to show the versioned QR payload.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
-              )
-            else ...[
+              ),
+              const SizedBox(height: 8),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.data_object_outlined),
+                title: const Text('Test details'),
+                children: [
+                  _InfoRow(
+                    icon: Icons.badge_outlined,
+                    label: 'Device ID',
+                    value: controller.settingsSnapshot.deviceId,
+                  ),
+                  const SizedBox(height: 12),
+                  _InfoRow(
+                    icon: Icons.key_outlined,
+                    label: 'Test client token',
+                    value: controller.bootstrapToken,
+                    monospace: true,
+                  ),
+                ],
+              ),
+            ] else ...[
               Text('Pairing QR', style: theme.textTheme.labelLarge),
               const SizedBox(height: 8),
-              Wrap(
-                spacing: 16,
-                runSpacing: 16,
-                crossAxisAlignment: WrapCrossAlignment.start,
+              Center(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xffd7e1ec)),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: QrImageView(
+                      data: payloadQrText!,
+                      version: QrVersions.auto,
+                      size: 240,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.data_object_outlined),
+                title: const Text('Payload and test details'),
                 children: [
+                  _InfoRow(
+                    icon: Icons.badge_outlined,
+                    label: 'Device ID',
+                    value: controller.settingsSnapshot.deviceId,
+                  ),
+                  const SizedBox(height: 12),
+                  _InfoRow(
+                    icon: Icons.key_outlined,
+                    label: 'Test client token',
+                    value: controller.bootstrapToken,
+                    monospace: true,
+                  ),
+                  const SizedBox(height: 12),
                   DecoratedBox(
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: const Color(0xfff0f4f8),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: const Color(0xffd7e1ec)),
                     ),
                     child: Padding(
                       padding: const EdgeInsets.all(12),
-                      child: QrImageView(
-                        data: payloadQrText!,
-                        version: QrVersions.auto,
-                        size: 220,
+                      child: SelectableText(
+                        payloadText,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'Consolas',
+                        ),
                       ),
-                    ),
-                  ),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 520),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Pairing payload',
-                          style: theme.textTheme.labelLarge,
-                        ),
-                        const SizedBox(height: 8),
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: const Color(0xfff0f4f8),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xffd7e1ec)),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SelectableText(
-                              payloadText,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                fontFamily: 'Consolas',
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
                     ),
                   ),
                 ],
@@ -931,6 +1025,61 @@ Future<void> _confirmClearTransferHistory(
   }
 }
 
+class _ActiveTransfersCard extends StatelessWidget {
+  const _ActiveTransfersCard({
+    required this.records,
+    required this.onCancelTransfer,
+  });
+
+  final List<TransferRecord> records;
+  final ValueChanged<TransferRecord> onCancelTransfer;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.sync, color: theme.colorScheme.primary),
+                const SizedBox(width: 10),
+                Text(
+                  'Active transfers',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (records.isEmpty)
+              Text(
+                'Incoming files will appear here while they are being received.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              )
+            else
+              Column(
+                children: [
+                  for (final record in records)
+                    _TransferTile(
+                      record: record,
+                      onCancel: onCancelTransfer,
+                    ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TransferHistoryCard extends StatelessWidget {
   const _TransferHistoryCard({
     required this.records,
@@ -1099,6 +1248,44 @@ class _TransferTile extends StatelessWidget {
   }
 }
 
+class _SettingChip extends StatelessWidget {
+  const _SettingChip({
+    required this.icon,
+    required this.label,
+    required this.enabled,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = enabled ? Colors.green.shade700 : theme.colorScheme.outline;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: enabled ? Colors.green.withAlpha(24) : theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withAlpha(120)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 6),
+            Text(
+              '$label ${enabled ? 'on' : 'off'}',
+              style: theme.textTheme.labelMedium?.copyWith(color: color),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 class _InfoRow extends StatelessWidget {
   const _InfoRow({
     required this.icon,

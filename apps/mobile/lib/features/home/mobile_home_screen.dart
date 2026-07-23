@@ -27,6 +27,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   TransferProgress? _progress;
   String? _selectedDeviceId;
   String? _lastError;
+  String? _dismissedCompletedTransferId;
   var _isSending = false;
   var _isPairing = false;
   var _isDiscovering = false;
@@ -102,6 +103,15 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     final hasFiles = _sharedFiles.isNotEmpty;
     final controlsEnabled = !_isSending && !_isPairing && !_isDiscovering;
     final canSend = hasFiles && controlsEnabled;
+    final selectedDevice = _selectedPairedDevice(
+      _pairedDevices,
+      _selectedDeviceId,
+    );
+    final hasPairedComputers = _pairedDevices.isNotEmpty;
+    final latestCompleted = _latestCompletedRecord(_transferHistory);
+    final visibleCompleted = latestCompleted?.id == _dismissedCompletedTransferId
+        ? null
+        : latestCompleted;
 
     return Scaffold(
       appBar: AppBar(
@@ -116,10 +126,10 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(14, 14, 14, 24),
           children: [
             Text(
-              hasFiles ? 'Files selected' : 'Ready to share',
+              hasFiles ? 'Ready to send' : 'Ready to share',
               style: theme.textTheme.headlineSmall?.copyWith(
                 fontWeight: FontWeight.w700,
               ),
@@ -127,18 +137,18 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
             const SizedBox(height: 6),
             Text(
               hasFiles
-                  ? '${_sharedFiles.length} file${_sharedFiles.length == 1 ? '' : 's'} waiting for a paired computer.'
+                  ? '${_sharedFiles.length} file${_sharedFiles.length == 1 ? '' : 's'} selected for ${selectedDevice?.deviceName ?? 'a computer'}.'
                   : 'Use Android share and choose Send to PC.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 14),
             _SelectedFilesCard(
               files: _sharedFiles,
               onClear: hasFiles && !_isSending ? _clearFiles : null,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             _PairedComputersCard(
               devices: _pairedDevices,
               selectedDeviceId: _selectedDeviceId,
@@ -148,14 +158,15 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
               onForget: _forgetDevice,
               onDiscover: _discoverPairedDevices,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             _DestinationCard(
+              selectedDevice: selectedDevice,
               hostController: _hostController,
               portController: _portController,
               tokenController: _tokenController,
               enabled: controlsEnabled,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             FilledButton.icon(
               onPressed: canSend ? _sendFiles : null,
               icon: _isSending
@@ -166,26 +177,47 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
                   : const Icon(Icons.send_outlined),
               label: Text(_isSending ? 'Sending' : 'Send'),
             ),
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              onPressed: controlsEnabled ? _pairNewComputer : null,
-              icon: _isPairing
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.qr_code_scanner_outlined),
-              label: Text(_isPairing ? 'Pairing' : 'Pair new computer'),
-            ),
+            const SizedBox(height: 12),
+            if (!hasPairedComputers)
+              FilledButton.icon(
+                onPressed: controlsEnabled ? _pairNewComputer : null,
+                icon: _isPairing
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.qr_code_scanner_outlined),
+                label: Text(_isPairing ? 'Pairing' : 'Pair new computer'),
+              )
+            else
+              OutlinedButton.icon(
+                onPressed: controlsEnabled ? _pairNewComputer : null,
+                icon: _isPairing
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.qr_code_scanner_outlined),
+                label: Text(_isPairing ? 'Pairing' : 'Pair another computer'),
+              ),
             if (_lastError != null) ...[
-              const SizedBox(height: 16),
-              _ErrorCard(message: _lastError!),
+              const SizedBox(height: 12),
+              _ErrorCard(
+                message: _lastError!,
+                onRetry: canSend ? _sendFiles : null,
+                onPairAgain: controlsEnabled ? _pairNewComputer : null,
+              ),
             ],
-            if (_progress != null && _progress!.status != TransferStatus.completed) ...[
-              const SizedBox(height: 16),
-              _TransferProgressCard(progress: _progress!),
+            if (_progress != null || visibleCompleted != null) ...[
+              const SizedBox(height: 12),
+              _ActiveTransferCard(
+                progress: _progress,
+                completedRecord: _progress == null ? visibleCompleted : null,
+                onSendAnother:
+                    visibleCompleted == null ? null : _dismissCompletedTransfer,
+              ),
             ],
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
             _RecentTransfersCard(
               records: _transferHistory,
               onClear: _transferHistory.isEmpty || _isSending
@@ -228,6 +260,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           _sharedFiles = const <SharedFile>[];
           _transferHistory = history;
           _progress = null;
+          _dismissedCompletedTransferId = null;
         });
       }
     } on Object catch (error) {
@@ -237,6 +270,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           _lastError = _errorMessage(error);
           _transferHistory = history;
           _progress = null;
+          _dismissedCompletedTransferId = null;
         });
       }
     } finally {
@@ -367,8 +401,19 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   Future<void> _clearTransferHistory() async {
     await _shareBridge.clearTransferHistory();
     if (mounted) {
-      setState(() => _transferHistory = const <TransferRecord>[]);
+      setState(() {
+        _transferHistory = const <TransferRecord>[];
+        _dismissedCompletedTransferId = null;
+      });
     }
+  }
+
+  void _dismissCompletedTransfer() {
+    final completed = _latestCompletedRecord(_transferHistory);
+    if (completed == null) {
+      return;
+    }
+    setState(() => _dismissedCompletedTransferId = completed.id);
   }
 
   void _selectDevice(PairedDevice device) {
@@ -395,6 +440,15 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     for (final device in devices) {
       if (device.id == selectedId) {
         return device;
+      }
+    }
+    return null;
+  }
+
+  TransferRecord? _latestCompletedRecord(List<TransferRecord> records) {
+    for (final record in records) {
+      if (record.status == TransferStatus.completed) {
+        return record;
       }
     }
     return null;
@@ -427,7 +481,7 @@ class _SelectedFilesCard extends StatelessWidget {
     final theme = Theme.of(context);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -534,7 +588,7 @@ class _PairedComputersCard extends StatelessWidget {
     final theme = Theme.of(context);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -564,7 +618,7 @@ class _PairedComputersCard extends StatelessWidget {
             const SizedBox(height: 10),
             if (devices.isEmpty)
               Text(
-                'No paired computers saved.',
+                'No paired computers yet. Pair your Windows receiver once and it will appear here.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -606,6 +660,126 @@ class _PairedComputersCard extends StatelessWidget {
 
 class _DestinationCard extends StatelessWidget {
   const _DestinationCard({
+    required this.selectedDevice,
+    required this.hostController,
+    required this.portController,
+    required this.tokenController,
+    required this.enabled,
+  });
+
+  final PairedDevice? selectedDevice;
+  final TextEditingController hostController;
+  final TextEditingController portController;
+  final TextEditingController tokenController;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final device = selectedDevice;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.computer_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 10),
+                Text(
+                  'Destination',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (device == null) ...[
+              Text(
+                'No paired computer selected.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _ManualDestinationFields(
+                hostController: hostController,
+                portController: portController,
+                tokenController: tokenController,
+                enabled: enabled,
+              ),
+            ] else ...[
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer.withAlpha(96),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: theme.colorScheme.outlineVariant),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.check_circle_outline,
+                        color: theme.colorScheme.primary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              device.deviceName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _deviceEndpoint(device),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.tune_outlined),
+                title: const Text('Advanced connection'),
+                subtitle: const Text('Manual host and token'),
+                children: [
+                  _ManualDestinationFields(
+                    hostController: hostController,
+                    portController: portController,
+                    tokenController: tokenController,
+                    enabled: enabled,
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ManualDestinationFields extends StatelessWidget {
+  const _ManualDestinationFields({
     required this.hostController,
     required this.portController,
     required this.tokenController,
@@ -619,118 +793,166 @@ class _DestinationCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              flex: 3,
+              child: TextField(
+                controller: hostController,
+                enabled: enabled,
+                decoration: const InputDecoration(
+                  labelText: 'PC host',
+                  hintText: '192.168.1.25 or 10.0.2.2',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                keyboardType: TextInputType.url,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: portController,
+                enabled: enabled,
+                decoration: const InputDecoration(
+                  labelText: 'Port',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                keyboardType: TextInputType.number,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: tokenController,
+          enabled: enabled,
+          decoration: const InputDecoration(
+            labelText: 'Device token',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+        ),
+      ],
+    );
+  }
+}
+
+class _ActiveTransferCard extends StatelessWidget {
+  const _ActiveTransferCard({
+    required this.progress,
+    required this.completedRecord,
+    required this.onSendAnother,
+  });
+
+  final TransferProgress? progress;
+  final TransferRecord? completedRecord;
+  final VoidCallback? onSendAnother;
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final activeProgress = progress;
+    final completed = completedRecord;
+    if (activeProgress == null && completed == null) {
+      return const SizedBox.shrink();
+    }
+
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(Icons.computer_outlined, color: theme.colorScheme.primary),
+                Icon(
+                  activeProgress == null
+                      ? Icons.check_circle_outline
+                      : Icons.sync,
+                  color: activeProgress == null
+                      ? Colors.green.shade700
+                      : theme.colorScheme.primary,
+                ),
                 const SizedBox(width: 10),
                 Text(
-                  'Destination computer',
+                  activeProgress == null ? 'Last transfer' : 'Active transfer',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                Expanded(
-                  flex: 3,
-                  child: TextField(
-                    controller: hostController,
-                    enabled: enabled,
-                    decoration: const InputDecoration(
-                      labelText: 'PC host',
-                      hintText: '192.168.1.25 or 10.0.2.2',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    keyboardType: TextInputType.url,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: portController,
-                    enabled: enabled,
-                    decoration: const InputDecoration(
-                      labelText: 'Port',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: tokenController,
-              enabled: enabled,
-              decoration: const InputDecoration(
-                labelText: 'Device token',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              obscureText: true,
-              autocorrect: false,
-              enableSuggestions: false,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TransferProgressCard extends StatelessWidget {
-  const _TransferProgressCard({required this.progress});
-
-  final TransferProgress progress;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.sync, color: theme.colorScheme.primary),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    progress.fileName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Text(progress.status.jsonName),
-              ],
-            ),
             const SizedBox(height: 12),
-            LinearProgressIndicator(value: progress.percentage),
-            const SizedBox(height: 8),
-            Text(
-              'File ${progress.currentFileNumber} of ${progress.totalFileCount} - '
-              '${_formatBytes(progress.bytesTransferred)} of ${_formatBytes(progress.totalBytes)}',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            if (activeProgress != null) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      activeProgress.fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(activeProgress.status.jsonName),
+                ],
               ),
-            ),
+              const SizedBox(height: 10),
+              LinearProgressIndicator(value: activeProgress.percentage),
+              const SizedBox(height: 8),
+              Text(
+                'File ${activeProgress.currentFileNumber} of ${activeProgress.totalFileCount} - '
+                '${_formatBytes(activeProgress.bytesTransferred)} of ${_formatBytes(activeProgress.totalBytes)}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ] else if (completed != null) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      completed.safeFileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(completed.status.jsonName),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${_formatBytes(completed.fileSize)} received${completed.completedAt == null ? '' : ' at ${_formatTime(completed.completedAt!)}'}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (onSendAnother != null) ...[
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: onSendAnother,
+                    icon: const Icon(Icons.add_outlined),
+                    label: const Text('Send another'),
+                  ),
+                ),
+              ],
+            ],
           ],
         ),
       ),
@@ -739,26 +961,59 @@ class _TransferProgressCard extends StatelessWidget {
 }
 
 class _ErrorCard extends StatelessWidget {
-  const _ErrorCard({required this.message});
+  const _ErrorCard({
+    required this.message,
+    required this.onRetry,
+    required this.onPairAgain,
+  });
 
   final String message;
+  final VoidCallback? onRetry;
+  final VoidCallback? onPairAgain;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.error_outline, color: theme.colorScheme.error),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(color: theme.colorScheme.error),
-              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.error_outline, color: theme.colorScheme.error),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(color: theme.colorScheme.error),
+                  ),
+                ),
+              ],
             ),
+            if (onRetry != null || onPairAgain != null) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (onRetry != null)
+                    FilledButton.icon(
+                      onPressed: onRetry,
+                      icon: const Icon(Icons.refresh_outlined),
+                      label: const Text('Retry'),
+                    ),
+                  if (onPairAgain != null)
+                    OutlinedButton.icon(
+                      onPressed: onPairAgain,
+                      icon: const Icon(Icons.qr_code_scanner_outlined),
+                      label: const Text('Pair again'),
+                    ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -780,7 +1035,7 @@ class _RecentTransfersCard extends StatelessWidget {
     final theme = Theme.of(context);
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -806,7 +1061,7 @@ class _RecentTransfersCard extends StatelessWidget {
             const SizedBox(height: 10),
             if (records.isEmpty)
               Text(
-                'Transfer history will appear here.',
+                'Completed sends will appear here.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -836,7 +1091,11 @@ class _TransferHistoryTile extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(_transferStatusIcon(record.status), size: 20),
+              Icon(
+                _transferStatusIcon(record.status),
+                size: 20,
+                color: _transferStatusColor(theme, record.status),
+              ),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
@@ -849,7 +1108,13 @@ class _TransferHistoryTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(record.status.jsonName),
+              Text(
+                record.status.jsonName,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: _transferStatusColor(theme, record.status),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 4),
@@ -863,7 +1128,7 @@ class _TransferHistoryTile extends StatelessWidget {
           if (record.completedAt != null) ...[
             const SizedBox(height: 2),
             Text(
-              record.completedAt!.toLocal().toString(),
+              _formatTime(record.completedAt!),
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -1125,6 +1390,24 @@ IconData _transferStatusIcon(TransferStatus status) {
     TransferStatus.verifying => Icons.verified_outlined,
     _ => Icons.insert_drive_file_outlined,
   };
+}
+
+Color _transferStatusColor(ThemeData theme, TransferStatus status) {
+  return switch (status) {
+    TransferStatus.completed => Colors.green.shade700,
+    TransferStatus.failed => theme.colorScheme.error,
+    TransferStatus.cancelled => theme.colorScheme.onSurfaceVariant,
+    TransferStatus.uploading || TransferStatus.verifying =>
+      theme.colorScheme.primary,
+    _ => theme.colorScheme.onSurfaceVariant,
+  };
+}
+
+String _formatTime(DateTime value) {
+  final local = value.toLocal();
+  final hour = local.hour.toString().padLeft(2, '0');
+  final minute = local.minute.toString().padLeft(2, '0');
+  return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')} $hour:$minute';
 }
 
 String _formatBytes(int bytes) {
