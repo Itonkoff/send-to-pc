@@ -20,7 +20,7 @@ This checkpoint contains:
 - Android recent-transfer history persisted from completed receiver responses and failed send attempts.
 - Shared Dart packages for models, protocol errors, security, and storage helpers.
 
-The current implementation covers Phase 1, Phase 2, Android share-target registration and streamed upload from Phase 3, QR-based Android pairing plus trusted-device revocation from Phase 4, a practical trusted-ID discovery refresh from Phase 5, and lightweight desktop open-folder actions from Phase 7. mDNS advertisement, HTTPS, tray mode, notifications, and startup integration are next phases.
+The current implementation covers Phase 1, Phase 2, Android share-target registration and streamed upload from Phase 3, QR-based Android pairing plus trusted-device revocation from Phase 4, a practical trusted-ID discovery refresh from Phase 5, lightweight desktop open-folder actions and tray mode from Phase 7. mDNS advertisement, HTTPS, notifications, and startup integration are next phases.
 
 ## Project Layout
 

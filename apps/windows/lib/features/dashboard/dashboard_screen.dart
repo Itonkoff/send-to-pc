@@ -248,6 +248,7 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
   late final TextEditingController _receiveFolderController;
   late final TextEditingController _portController;
   late final TextEditingController _maxFileSizeController;
+  late bool _minimizeToTray;
   String? _error;
 
   @override
@@ -262,6 +263,7 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
     _maxFileSizeController = TextEditingController(
       text: _megabytes(widget.settings.maximumFileSizeBytes).toString(),
     );
+    _minimizeToTray = widget.settings.minimizeToTray;
   }
 
   @override
@@ -295,6 +297,7 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
         receiveFolder: receiveFolder,
         listenPort: port,
         maximumFileSizeBytes: maxFileSizeMb * 1024 * 1024,
+        minimizeToTray: _minimizeToTray,
       ),
     );
   }
@@ -336,6 +339,16 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                value: _minimizeToTray,
+                onChanged: (value) {
+                  setState(() => _minimizeToTray = value ?? true);
+                },
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Minimize to system tray'),
+                controlAffinity: ListTileControlAffinity.leading,
               ),
               if (_error != null) ...[
                 const SizedBox(height: 12),

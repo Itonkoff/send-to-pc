@@ -14,4 +14,4 @@ The Android app is registered as a generic Android share target and forwards sha
 - Discovery: mDNS advertisement as `_sendtopc._tcp.local` on top of the current trusted-ID local probe refresh.
 - Security: HTTPS with certificate fingerprint pinning after pairing.
 - Settings: editable receive folder, listening port, and maximum file size.
-- Desktop integration: open receive folder/open received file now; tray mode, startup registration, and Windows notifications next.
+- Desktop integration: tray mode plus open receive folder/open received file now; startup registration and Windows notifications next.
