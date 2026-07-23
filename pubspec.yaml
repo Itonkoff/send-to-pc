@@ -1,0 +1,17 @@
+name: send_to_pc_workspace
+description: Send to PC monorepo workspace helpers.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  shared_models:
+    path: packages/shared_models
+  shared_protocol:
+    path: packages/shared_protocol
+  shared_security:
+    path: packages/shared_security
+  shared_storage:
+    path: packages/shared_storage

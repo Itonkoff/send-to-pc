@@ -1,0 +1,35 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Dart and Flutter
+.dart_tool/
+**/.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+**/build/
+coverage/
+**/coverage/
+
+# Android and Gradle
+.gradle/
+**/.gradle/
+**/android/local.properties
+**/android/.gradle/
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+
+# Generated reports and logs
+*.log
+*.tmp
+*.temp

@@ -1,0 +1,8 @@
+name: shared_protocol
+description: Shared Send to PC protocol constants and errors.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.5
+

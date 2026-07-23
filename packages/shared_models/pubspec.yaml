@@ -1,0 +1,8 @@
+name: shared_models
+description: Shared Send to PC data models.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.5
+

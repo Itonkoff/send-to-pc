@@ -1,0 +1,8 @@
+name: shared_storage
+description: Shared Send to PC storage helpers.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.5
+
