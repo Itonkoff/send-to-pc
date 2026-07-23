@@ -90,6 +90,56 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+
+  test('rejects invalid MIME type during transfer creation', () async {
+    final harness = await _startReceiverHarness();
+
+    try {
+      final response = await _createTransferResponse(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+        mimeType: 'not-a-mime-type',
+      );
+
+      expect(response.statusCode, HttpStatus.badRequest);
+      expect(response.body['code'], ErrorCodes.invalidMimeType);
+      expect(harness.server.records, isEmpty);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  test('rejects new transfers over configured concurrency limit', () async {
+    final harness = await _startReceiverHarness(
+      maximumConcurrentTransfers: 1,
+    );
+
+    try {
+      await _createTransfer(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+        fileName: 'one.bin',
+      );
+
+      final response = await _createTransferResponse(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+        fileName: 'two.bin',
+      );
+
+      expect(response.statusCode, HttpStatus.serviceUnavailable);
+      expect(response.body['code'], ErrorCodes.serverUnavailable);
+      expect(harness.server.records, hasLength(1));
+    } finally {
+      await harness.dispose();
+    }
+  });
 }
 
 Future<TransferCreateResponse> _createTransfer(
@@ -97,6 +147,28 @@ Future<TransferCreateResponse> _createTransfer(
   required int port,
   required String token,
   required int declaredFileSize,
+  String fileName = 'too-large.bin',
+  String mimeType = 'application/octet-stream',
+}) async {
+  final response = await _createTransferResponse(
+    client,
+    port: port,
+    token: token,
+    declaredFileSize: declaredFileSize,
+    fileName: fileName,
+    mimeType: mimeType,
+  );
+  expect(response.statusCode, HttpStatus.created);
+  return TransferCreateResponse.fromJson(response.body);
+}
+
+Future<_JsonResponse> _createTransferResponse(
+  HttpClient client, {
+  required int port,
+  required String token,
+  required int declaredFileSize,
+  String fileName = 'too-large.bin',
+  String mimeType = 'application/octet-stream',
 }) async {
   final request = await client.postUrl(
     Uri.parse('http://127.0.0.1:$port${ApiRoutes.transfers}'),
@@ -106,8 +178,8 @@ Future<TransferCreateResponse> _createTransfer(
   request.add(
     utf8.encode(
       jsonEncode(<String, Object?>{
-        'fileName': 'too-large.bin',
-        'mimeType': 'application/octet-stream',
+        'fileName': fileName,
+        'mimeType': mimeType,
         'fileSize': declaredFileSize,
         'checksumAlgorithm': AppConstants.checksumAlgorithm,
         'checksum': '00',
@@ -117,9 +189,9 @@ Future<TransferCreateResponse> _createTransfer(
 
   final response = await request.close();
   final body = await utf8.decoder.bind(response).join();
-  expect(response.statusCode, HttpStatus.created);
-  return TransferCreateResponse.fromJson(
-    Map<String, dynamic>.from(jsonDecode(body) as Map),
+  return _JsonResponse(
+    statusCode: response.statusCode,
+    body: Map<String, dynamic>.from(jsonDecode(body) as Map),
   );
 }
 
@@ -145,6 +217,82 @@ Future<_JsonResponse> _uploadBytes(
   return _JsonResponse(
     statusCode: response.statusCode,
     body: Map<String, dynamic>.from(jsonDecode(body) as Map),
+  );
+}
+
+class _ReceiverHarness {
+  const _ReceiverHarness({
+    required this.directory,
+    required this.client,
+    required this.device,
+    required this.server,
+  });
+
+  final Directory directory;
+  final HttpClient client;
+  final PairedDevice device;
+  final ReceiverServer server;
+
+  Future<void> dispose() async {
+    client.close(force: true);
+    await server.stop();
+    await directory.delete(recursive: true);
+  }
+}
+
+Future<_ReceiverHarness> _startReceiverHarness({
+  int maximumFileSizeBytes = 1024,
+  int maximumConcurrentTransfers = 2,
+}) async {
+  final directory = await Directory.systemTemp.createTemp(
+    'send_to_pc_receiver_',
+  );
+  final receiveDirectory = Directory(joinPath(directory.path, 'receive'));
+  final deviceRepository = PairedDeviceRepository(appDataPath: directory.path);
+  final trustedDevices = TrustedDeviceStore(
+    await deviceRepository.load(),
+    repository: deviceRepository,
+  );
+  final device = await trustedDevices.trustDevice(
+    deviceId: 'phone-test',
+    deviceName: 'Test Phone',
+    platform: 'android',
+  );
+  final settings = AppSettings(
+    receiveFolder: receiveDirectory.path,
+    listenPort: 0,
+    maximumFileSizeBytes: maximumFileSizeBytes,
+    maximumConcurrentTransfers: maximumConcurrentTransfers,
+  );
+  ReceiverServer? server;
+  final pairingCoordinator = PairingCoordinator(
+    receiverDeviceId: 'pc-test',
+    receiverDeviceName: 'Test PC',
+    hostProvider: () => '127.0.0.1',
+    portProvider: () => server?.boundPort ?? 0,
+    trustedDevices: trustedDevices,
+  );
+  server = ReceiverServer(
+    deviceInfo: const DeviceInfo(
+      deviceId: 'pc-test',
+      deviceName: 'Test PC',
+      platform: 'windows',
+      protocolVersion: AppConstants.protocolVersion,
+      serverVersion: AppConstants.serverVersion,
+      requiresAuthentication: true,
+    ),
+    settings: settings,
+    storage: ReceiveFileStorage(receiveFolder: receiveDirectory.path),
+    trustedDevices: trustedDevices,
+    pairingCoordinator: pairingCoordinator,
+    transferHistory: TransferRecordRepository(appDataPath: directory.path),
+  );
+  await server.start();
+  return _ReceiverHarness(
+    directory: directory,
+    client: HttpClient(),
+    device: device,
+    server: server,
   );
 }
 

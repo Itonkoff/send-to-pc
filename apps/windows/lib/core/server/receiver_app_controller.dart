@@ -44,6 +44,7 @@ class ReceiverAppController extends ChangeNotifier {
   List<String> get localAddresses => List.unmodifiable(_localAddresses);
   int get listeningPort => server.boundPort ?? settingsSnapshot.appSettings.listenPort;
   List<TransferRecord> get records => List.unmodifiable(_records.reversed);
+  int get activeTransferCount => _records.where(_isActiveTransfer).length;
   List<PairedDevice> get pairedDevices => trustedDevices.devices;
   PairingSessionSnapshot? get activePairingSession => pairingCoordinator.activeSession;
   List<PairingRequestSnapshot> get pairingRequests => pairingCoordinator.requests;
@@ -175,6 +176,27 @@ class ReceiverAppController extends ChangeNotifier {
     await server.clearTransferHistory();
     _records = server.records;
     notifyListeners();
+  }
+
+  Future<void> cancelTransfer(String transferId) async {
+    await server.cancelTransfer(transferId);
+    _records = server.records;
+    notifyListeners();
+  }
+
+  bool _isActiveTransfer(TransferRecord record) {
+    return switch (record.status) {
+      TransferStatus.pending ||
+      TransferStatus.connecting ||
+      TransferStatus.uploading ||
+      TransferStatus.uploaded ||
+      TransferStatus.verifying =>
+        true,
+      TransferStatus.completed ||
+      TransferStatus.failed ||
+      TransferStatus.cancelled =>
+        false,
+    };
   }
 
   Future<void> updateAppSettings(AppSettings appSettings) async {

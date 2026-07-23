@@ -107,10 +107,15 @@ class _SendToPcWindowsAppState extends State<SendToPcWindowsApp>
   Future<void> _syncTrayMenu() async {
     try {
       final status = widget.controller.isRunning ? 'Listening' : 'Paused';
+      final activeTransfers = widget.controller.activeTransferCount;
+      final activityLabel = _activeTransfersLabel(activeTransfers);
       final menu = tray.Menu(
         items: [
           tray.MenuItem(key: 'open', label: 'Open Send to PC'),
           tray.MenuItem(key: 'open_folder', label: 'Show receive folder'),
+          if (activeTransfers > 0) ...[
+            tray.MenuItem(key: 'transfer_status', label: activityLabel),
+          ],
           tray.MenuItem.separator(),
           tray.MenuItem(
             key: 'toggle_receiving',
@@ -122,11 +127,20 @@ class _SendToPcWindowsAppState extends State<SendToPcWindowsApp>
           tray.MenuItem(key: 'quit', label: 'Quit Send to PC'),
         ],
       );
-      await tray.trayManager.setToolTip('Send to PC - $status');
+      final tooltip = activeTransfers > 0
+          ? 'Send to PC - $status - $activityLabel'
+          : 'Send to PC - $status';
+      await tray.trayManager.setToolTip(tooltip);
       await tray.trayManager.setContextMenu(menu);
     } on Object {
       // See _initializeDesktopShell.
     }
+  }
+
+  String _activeTransfersLabel(int activeTransfers) {
+    return activeTransfers == 1
+        ? '1 active transfer'
+        : '$activeTransfers active transfers';
   }
 
   Future<void> _handleWindowClose() async {

@@ -77,6 +77,9 @@ class DashboardScreen extends StatelessWidget {
                               _confirmClearTransferHistory(context, controller),
                             );
                           },
+                    onCancelTransfer: (record) {
+                      unawaited(controller.cancelTransfer(record.id));
+                    },
                   ),
                 ],
               ),
@@ -184,6 +187,12 @@ class _ReceiverCard extends StatelessWidget {
                 controller.settingsSnapshot.appSettings.maximumFileSizeBytes,
               ),
             ),
+            const SizedBox(height: 12),
+            _InfoRow(
+              icon: Icons.swap_horiz_outlined,
+              label: 'Maximum concurrent transfers',
+              value: '${controller.settingsSnapshot.appSettings.maximumConcurrentTransfers}',
+            ),
             const SizedBox(height: 14),
             Align(
               alignment: Alignment.centerLeft,
@@ -248,7 +257,9 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
   late final TextEditingController _receiveFolderController;
   late final TextEditingController _portController;
   late final TextEditingController _maxFileSizeController;
+  late final TextEditingController _maxConcurrentTransfersController;
   late bool _minimizeToTray;
+  late bool _showNotifications;
   String? _error;
 
   @override
@@ -263,7 +274,11 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
     _maxFileSizeController = TextEditingController(
       text: _megabytes(widget.settings.maximumFileSizeBytes).toString(),
     );
+    _maxConcurrentTransfersController = TextEditingController(
+      text: '${widget.settings.maximumConcurrentTransfers}',
+    );
     _minimizeToTray = widget.settings.minimizeToTray;
+    _showNotifications = widget.settings.showNotifications;
   }
 
   @override
@@ -271,13 +286,55 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
     _receiveFolderController.dispose();
     _portController.dispose();
     _maxFileSizeController.dispose();
+    _maxConcurrentTransfersController.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickReceiveFolder() async {
+    final initialFolder = _receiveFolderController.text.trim();
+    final quotedFolder = _powerShellStringLiteral(initialFolder);
+    final script = '''
+Add-Type -AssemblyName System.Windows.Forms
+\$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+\$dialog.Description = 'Choose Send to PC receive folder'
+\$dialog.ShowNewFolderButton = \$true
+if ([System.IO.Directory]::Exists($quotedFolder)) {
+  \$dialog.SelectedPath = $quotedFolder
+}
+if (\$dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::Out.Write(\$dialog.SelectedPath)
+}
+''';
+
+    final result = await Process.run(
+      'powershell.exe',
+      <String>['-NoProfile', '-STA', '-Command', script],
+    );
+    if (!mounted) {
+      return;
+    }
+
+    if (result.exitCode != 0) {
+      setState(() => _error = 'Could not open the folder picker.');
+      return;
+    }
+
+    final selectedFolder = result.stdout.toString().trim();
+    if (selectedFolder.isNotEmpty) {
+      setState(() {
+        _receiveFolderController.text = selectedFolder;
+        _error = null;
+      });
+    }
   }
 
   void _save() {
     final receiveFolder = _receiveFolderController.text.trim();
     final port = int.tryParse(_portController.text.trim());
     final maxFileSizeMb = int.tryParse(_maxFileSizeController.text.trim());
+    final maxConcurrentTransfers = int.tryParse(
+      _maxConcurrentTransfersController.text.trim(),
+    );
 
     if (receiveFolder.isEmpty) {
       setState(() => _error = 'Enter a receive folder.');
@@ -291,13 +348,19 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
       setState(() => _error = 'Enter a maximum file size of at least 1 MB.');
       return;
     }
+    if (maxConcurrentTransfers == null || maxConcurrentTransfers < 1) {
+      setState(() => _error = 'Allow at least 1 concurrent transfer.');
+      return;
+    }
 
     Navigator.of(context).pop(
       widget.settings.copyWith(
         receiveFolder: receiveFolder,
         listenPort: port,
         maximumFileSizeBytes: maxFileSizeMb * 1024 * 1024,
+        maximumConcurrentTransfers: maxConcurrentTransfers,
         minimizeToTray: _minimizeToTray,
+        showNotifications: _showNotifications,
       ),
     );
   }
@@ -313,13 +376,26 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                controller: _receiveFolderController,
-                decoration: const InputDecoration(
-                  labelText: 'Receive folder',
-                  border: OutlineInputBorder(),
-                ),
-                textInputAction: TextInputAction.next,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _receiveFolderController,
+                      decoration: const InputDecoration(
+                        labelText: 'Receive folder',
+                        border: OutlineInputBorder(),
+                      ),
+                      textInputAction: TextInputAction.next,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Browse folders',
+                    onPressed: _pickReceiveFolder,
+                    icon: const Icon(Icons.folder_open_outlined),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               TextField(
@@ -339,6 +415,16 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
                   border: OutlineInputBorder(),
                 ),
                 keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _maxConcurrentTransfersController,
+                decoration: const InputDecoration(
+                  labelText: 'Maximum concurrent transfers',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
               ),
               const SizedBox(height: 8),
               CheckboxListTile(
@@ -348,6 +434,15 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
                 },
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Minimize to system tray'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              CheckboxListTile(
+                value: _showNotifications,
+                onChanged: (value) {
+                  setState(() => _showNotifications = value ?? true);
+                },
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Show notifications'),
                 controlAffinity: ListTileControlAffinity.leading,
               ),
               if (_error != null) ...[
@@ -383,6 +478,10 @@ class _ReceiverSettingsDialogState extends State<_ReceiverSettingsDialog> {
 
 int _megabytes(int bytes) {
   return (bytes / (1024 * 1024)).round().clamp(1, 1 << 31).toInt();
+}
+
+String _powerShellStringLiteral(String value) {
+  return "'${value.replaceAll("'", "''")}'";
 }
 
 Future<void> _openReceiveFolder(
@@ -816,10 +915,12 @@ class _TransferHistoryCard extends StatelessWidget {
   const _TransferHistoryCard({
     required this.records,
     required this.onClear,
+    required this.onCancelTransfer,
   });
 
   final List<TransferRecord> records;
   final VoidCallback? onClear;
+  final ValueChanged<TransferRecord> onCancelTransfer;
 
   @override
   Widget build(BuildContext context) {
@@ -859,7 +960,11 @@ class _TransferHistoryCard extends StatelessWidget {
             else
               Column(
                 children: [
-                  for (final record in records) _TransferTile(record: record),
+                  for (final record in records)
+                    _TransferTile(
+                      record: record,
+                      onCancel: onCancelTransfer,
+                    ),
                 ],
               ),
           ],
@@ -870,13 +975,26 @@ class _TransferHistoryCard extends StatelessWidget {
 }
 
 class _TransferTile extends StatelessWidget {
-  const _TransferTile({required this.record});
+  const _TransferTile({
+    required this.record,
+    required this.onCancel,
+  });
 
   final TransferRecord record;
+  final ValueChanged<TransferRecord> onCancel;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final canCancel = _isActiveTransferStatus(record.status);
+    final speed = _transferSpeedBytesPerSecond(record);
+    final remaining = _estimatedRemainingTime(record, speed);
+    final detailParts = <String>[
+      '${_formatBytes(record.bytesTransferred)} of ${_formatBytes(record.fileSize)}',
+      if (speed != null) '${_formatBytes(speed.round())}/s',
+      if (remaining != null) '${_formatDuration(remaining)} remaining',
+    ];
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
@@ -898,7 +1016,14 @@ class _TransferTile extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Text(record.status.jsonName),
-              if (record.finalPath != null) ...[
+              if (canCancel) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: 'Cancel transfer',
+                  onPressed: () => onCancel(record),
+                  icon: const Icon(Icons.cancel_outlined),
+                ),
+              ] else if (record.finalPath != null) ...[
                 const SizedBox(width: 4),
                 IconButton(
                   tooltip: 'Show in folder',
@@ -910,12 +1035,20 @@ class _TransferTile extends StatelessWidget {
               ],
             ],
           ),
+          const SizedBox(height: 4),
+          Text(
+            'From ${record.senderDeviceId}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
           const SizedBox(height: 8),
           LinearProgressIndicator(value: record.progress),
           const SizedBox(height: 6),
           Text(
-            '${_formatBytes(record.bytesTransferred)} of '
-            '${_formatBytes(record.fileSize)}',
+            detailParts.join(' - '),
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -991,6 +1124,62 @@ class _InfoRow extends StatelessWidget {
       ],
     );
   }
+}
+
+bool _isActiveTransferStatus(TransferStatus status) {
+  return switch (status) {
+    TransferStatus.pending ||
+    TransferStatus.connecting ||
+    TransferStatus.uploading ||
+    TransferStatus.uploaded ||
+    TransferStatus.verifying =>
+      true,
+    TransferStatus.completed ||
+    TransferStatus.failed ||
+    TransferStatus.cancelled =>
+      false,
+  };
+}
+
+double? _transferSpeedBytesPerSecond(TransferRecord record) {
+  if (record.bytesTransferred <= 0) {
+    return null;
+  }
+  final start = record.startedAt ?? record.createdAt;
+  final end = _isActiveTransferStatus(record.status)
+      ? DateTime.now()
+      : (record.completedAt ?? record.updatedAt);
+  final elapsedSeconds = end.difference(start).inMilliseconds / 1000;
+  if (elapsedSeconds <= 0) {
+    return null;
+  }
+  return record.bytesTransferred / elapsedSeconds;
+}
+
+Duration? _estimatedRemainingTime(TransferRecord record, double? speed) {
+  if (!_isActiveTransferStatus(record.status) || speed == null || speed <= 0) {
+    return null;
+  }
+  final remainingBytes = record.fileSize - record.bytesTransferred;
+  if (remainingBytes <= 0) {
+    return null;
+  }
+  return Duration(seconds: (remainingBytes / speed).ceil());
+}
+
+String _formatDuration(Duration duration) {
+  final totalSeconds = duration.inSeconds;
+  if (totalSeconds < 60) {
+    return '${totalSeconds}s';
+  }
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return '${minutes}m ${seconds}s';
+  }
+  final hours = minutes ~/ 60;
+  final remainingMinutes = minutes % 60;
+  return '${hours}h ${remainingMinutes}m';
 }
 
 class _StatusPill extends StatelessWidget {

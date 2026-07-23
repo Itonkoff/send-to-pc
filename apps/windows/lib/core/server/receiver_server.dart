@@ -84,6 +84,18 @@ class ReceiverServer {
         return;
       }
 
+      if (request.method == 'POST' &&
+          request.uri.path == ApiRoutes.pairingApprove) {
+        await _handlePairingDecision(request, approve: true);
+        return;
+      }
+
+      if (request.method == 'POST' &&
+          request.uri.path == ApiRoutes.pairingReject) {
+        await _handlePairingDecision(request, approve: false);
+        return;
+      }
+
       final device = trustedDevices.authenticate(
         request.headers.value(HttpHeaders.authorizationHeader),
       );
@@ -140,6 +152,37 @@ class ReceiverServer {
     await _writeJson(request.response, HttpStatus.ok, response);
   }
 
+  Future<void> _handlePairingDecision(
+    HttpRequest request, {
+    required bool approve,
+  }) async {
+    final decoded = await _readJson(request);
+    final requestId = decoded['requestId'];
+    if (requestId is! String || requestId.trim().isEmpty) {
+      await _writeError(
+        request.response,
+        HttpStatus.badRequest,
+        const ProtocolError(
+          code: ErrorCodes.internalError,
+          message: 'A pairing requestId is required.',
+        ),
+      );
+      return;
+    }
+
+    if (approve) {
+      await pairingCoordinator.approve(requestId.trim());
+    } else {
+      pairingCoordinator.reject(requestId.trim());
+    }
+
+    await _writeJson(
+      request.response,
+      HttpStatus.ok,
+      <String, Object?>{'status': approve ? 'approved' : 'rejected'},
+    );
+  }
+
   Future<bool> _tryHandleTransferRoute(
     HttpRequest request,
     PairedDevice device,
@@ -165,7 +208,12 @@ class ReceiverServer {
     }
 
     if (segments.length == 4 && request.method == 'DELETE') {
-      await _cancelTransfer(request, transferId);
+      final cancelled = await cancelTransfer(transferId);
+      if (cancelled == null) {
+        await _missingTransfer(request.response, transferId);
+      } else {
+        await _writeJson(request.response, HttpStatus.ok, cancelled.toJson());
+      }
       return true;
     }
 
@@ -193,6 +241,18 @@ class ReceiverServer {
     final decoded = await _readJson(request);
     final transferRequest = TransferRequest.fromJson(decoded);
 
+    if (_activeTransferCount >= settings.maximumConcurrentTransfers) {
+      await _writeError(
+        request.response,
+        HttpStatus.serviceUnavailable,
+        const ProtocolError(
+          code: ErrorCodes.serverUnavailable,
+          message: 'The receiver is already handling the maximum number of transfers.',
+        ),
+      );
+      return;
+    }
+
     if (transferRequest.fileSize < 0 ||
         transferRequest.fileSize > settings.maximumFileSizeBytes) {
       await _writeError(
@@ -214,6 +274,18 @@ class ReceiverServer {
         const ProtocolError(
           code: ErrorCodes.internalError,
           message: 'Only SHA-256 checksums are supported.',
+        ),
+      );
+      return;
+    }
+
+    if (!_isValidMimeType(transferRequest.mimeType)) {
+      await _writeError(
+        request.response,
+        HttpStatus.badRequest,
+        const ProtocolError(
+          code: ErrorCodes.invalidMimeType,
+          message: 'The transfer MIME type is invalid.',
         ),
       );
       return;
@@ -341,6 +413,21 @@ class ReceiverServer {
 
     try {
       await for (final chunk in request) {
+        if (_records[transferId]?.status == TransferStatus.cancelled) {
+          await sink.close();
+          await _safeDelete(partFile);
+          await _writeError(
+            request.response,
+            HttpStatus.conflict,
+            ProtocolError(
+              code: ErrorCodes.uploadInterrupted,
+              message: 'The transfer was cancelled.',
+              transferId: transferId,
+            ),
+          );
+          return;
+        }
+
         if (bytesTransferred + chunk.length > record.fileSize) {
           await sink.close();
           await _safeDelete(partFile);
@@ -464,6 +551,20 @@ class ReceiverServer {
 
     final partFile = File(record.temporaryPath!);
     final checksum = await sha256OfFile(partFile);
+    if (_records[transferId]?.status == TransferStatus.cancelled) {
+      await _safeDelete(partFile);
+      await _writeError(
+        request.response,
+        HttpStatus.conflict,
+        ProtocolError(
+          code: ErrorCodes.uploadInterrupted,
+          message: 'The transfer was cancelled.',
+          transferId: transferId,
+        ),
+      );
+      return;
+    }
+
     if (!constantTimeEquals(checksum.toLowerCase(), record.checksum)) {
       await _safeDelete(partFile);
       await _failTransfer(
@@ -498,17 +599,15 @@ class ReceiverServer {
     await _writeJson(request.response, HttpStatus.ok, current.toJson());
   }
 
-  Future<void> _cancelTransfer(
-    HttpRequest request,
-    String transferId,
-  ) async {
+  Future<TransferRecord?> cancelTransfer(String transferId) async {
     final record = _records[transferId];
     if (record == null) {
-      await _missingTransfer(request.response, transferId);
-      return;
+      return null;
     }
 
-    if (record.temporaryPath != null) {
+    if (record.temporaryPath != null &&
+        record.status != TransferStatus.uploading &&
+        record.status != TransferStatus.verifying) {
       await _safeDelete(File(record.temporaryPath!));
     }
 
@@ -518,7 +617,7 @@ class ReceiverServer {
       completedAt: DateTime.now(),
     );
     _updateRecord(cancelled);
-    await _writeJson(request.response, HttpStatus.ok, cancelled.toJson());
+    return cancelled;
   }
 
   Future<Map<String, dynamic>> _readJson(HttpRequest request) async {
@@ -617,6 +716,36 @@ class ReceiverServer {
 
   bool _shouldPersistRecord(TransferRecord record) {
     return record.status != TransferStatus.uploading;
+  }
+
+  int get _activeTransferCount {
+    return _records.values
+        .where((record) => switch (record.status) {
+              TransferStatus.pending ||
+              TransferStatus.connecting ||
+              TransferStatus.uploading ||
+              TransferStatus.uploaded ||
+              TransferStatus.verifying =>
+                true,
+              TransferStatus.completed ||
+              TransferStatus.failed ||
+              TransferStatus.cancelled =>
+                false,
+            })
+        .length;
+  }
+
+  bool _isValidMimeType(String mimeType) {
+    final trimmed = mimeType.trim();
+    if (trimmed.isEmpty || trimmed.length > 255) {
+      return false;
+    }
+    final parts = trimmed.split('/');
+    if (parts.length != 2 || parts.any((part) => part.isEmpty)) {
+      return false;
+    }
+    final token = RegExp(r"^[A-Za-z0-9!#$&^_.+-]+$");
+    return token.hasMatch(parts[0]) && token.hasMatch(parts[1]);
   }
 
   Future<void> _safeDelete(File file) async {
