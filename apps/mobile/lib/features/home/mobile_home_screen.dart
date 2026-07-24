@@ -24,6 +24,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   List<SharedFile> _sharedFiles = const <SharedFile>[];
   List<PairedDevice> _pairedDevices = const <PairedDevice>[];
   List<TransferRecord> _transferHistory = const <TransferRecord>[];
+  MobileAppSettings _settings = const MobileAppSettings.defaults();
   TransferProgress? _progress;
   String? _selectedDeviceId;
   String? _lastError;
@@ -50,8 +51,21 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       }
     });
     unawaited(_loadInitialFiles());
+    unawaited(_loadSettings());
     unawaited(_loadPairedDevices());
     unawaited(_loadTransferHistory());
+  }
+
+  Future<void> _loadSettings() async {
+    final settings = await _shareBridge.getMobileSettings();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _settings = settings;
+      _selectPreferredDevice(_pairedDevices, settings);
+    });
   }
 
   Future<void> _loadInitialFiles() async {
@@ -69,13 +83,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
 
     setState(() {
       _pairedDevices = devices;
-      final selectedStillExists = devices.any(
-        (device) => device.id == _selectedDeviceId,
-      );
-      if (!selectedStillExists && devices.isNotEmpty) {
-        _selectedDeviceId = devices.first.id;
-        _applyDeviceToControllers(devices.first);
-      }
+      _selectPreferredDevice(devices, _settings);
     });
   }
 
@@ -119,7 +127,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         actions: [
           IconButton(
             tooltip: 'Settings',
-            onPressed: () {},
+            onPressed: _showSettings,
             icon: const Icon(Icons.settings_outlined),
           ),
         ],
@@ -240,6 +248,13 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       return;
     }
 
+    if (_settings.confirmBeforeSending) {
+      final shouldSend = await _confirmSend(host, port);
+      if (!shouldSend) {
+        return;
+      }
+    }
+
     setState(() {
       _isSending = true;
       _lastError = null;
@@ -252,6 +267,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         port: port,
         token: token,
         files: _sharedFiles,
+        wifiOnly: _settings.wifiOnly,
       );
       await _shareBridge.clearSharedFiles();
       final history = await _shareBridge.getTransferHistory();
@@ -312,6 +328,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         _selectedDeviceId = device.id;
         _applyDeviceToControllers(device);
       });
+      unawaited(_saveSettings(
+        _settings.copyWith(defaultComputerId: device.id),
+      ));
     } on Object catch (error) {
       if (mounted) {
         setState(() => _lastError = _errorMessage(error));
@@ -326,8 +345,68 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   Future<_PairComputerInput?> _showPairingDialog() {
     return showDialog<_PairComputerInput>(
       context: context,
-      builder: (context) => const _PairComputerDialog(),
+      builder: (context) => _PairComputerDialog(
+        initialDeviceName: _settings.deviceName,
+      ),
     );
+  }
+
+  Future<void> _showSettings() async {
+    final settings = await showDialog<MobileAppSettings>(
+      context: context,
+      builder: (context) => _MobileSettingsDialog(
+        settings: _settings,
+        pairedDevices: _pairedDevices,
+      ),
+    );
+    if (settings == null) {
+      return;
+    }
+
+    final saved = await _shareBridge.saveMobileSettings(settings);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _settings = saved;
+      _lastError = null;
+      _selectPreferredDevice(_pairedDevices, saved);
+    });
+    await _loadTransferHistory();
+  }
+
+  Future<void> _saveSettings(MobileAppSettings settings) async {
+    final saved = await _shareBridge.saveMobileSettings(settings);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _settings = saved);
+  }
+
+  Future<bool> _confirmSend(String host, int port) async {
+    final destination = _selectedPairedDevice(_pairedDevices, _selectedDeviceId);
+    final fileCount = _sharedFiles.length;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Send files?'),
+            content: Text(
+              'Send $fileCount file${fileCount == 1 ? '' : 's'} to '
+              '${destination?.deviceName ?? '$host:$port'}?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Send'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   Future<void> _discoverPairedDevices() async {
@@ -349,12 +428,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
 
       setState(() {
         _pairedDevices = devices;
-        final selected = _selectedPairedDevice(devices, _selectedDeviceId) ??
-            (devices.isEmpty ? null : devices.first);
-        _selectedDeviceId = selected?.id;
-        if (selected != null) {
-          _applyDeviceToControllers(selected);
-        }
+        _selectPreferredDevice(devices, _settings);
       });
     } on Object catch (error) {
       if (mounted) {
@@ -373,22 +447,31 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       return;
     }
 
+    MobileAppSettings? nextSettings;
     setState(() {
       _pairedDevices = _pairedDevices
           .where((candidate) => candidate.id != device.id)
           .toList(growable: false);
-      if (_selectedDeviceId == device.id) {
+      if (_selectedDeviceId == device.id ||
+          _settings.defaultComputerId == device.id) {
         final next = _pairedDevices.isEmpty ? null : _pairedDevices.first;
         _selectedDeviceId = next?.id;
         if (next != null) {
           _applyDeviceToControllers(next);
+          nextSettings = _settings.copyWith(defaultComputerId: next.id);
         } else {
           _hostController.clear();
           _portController.text = '${AppConstants.defaultPort}';
           _tokenController.clear();
+          nextSettings = _settings.copyWith(clearDefaultComputerId: true);
         }
       }
     });
+
+    final settings = nextSettings;
+    if (settings != null) {
+      unawaited(_saveSettings(settings));
+    }
   }
 
   Future<void> _clearFiles() async {
@@ -422,6 +505,27 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       _lastError = null;
       _applyDeviceToControllers(device);
     });
+    unawaited(_saveSettings(
+      _settings.copyWith(defaultComputerId: device.id),
+    ));
+  }
+
+  void _selectPreferredDevice(
+    List<PairedDevice> devices,
+    MobileAppSettings settings,
+  ) {
+    final preferred = _selectedPairedDevice(devices, settings.defaultComputerId);
+    final current = _selectedPairedDevice(devices, _selectedDeviceId);
+    final next =
+        preferred ?? current ?? (devices.isEmpty ? null : devices.first);
+    _selectedDeviceId = next?.id;
+    if (next != null) {
+      _applyDeviceToControllers(next);
+    } else {
+      _hostController.clear();
+      _portController.text = '${AppConstants.defaultPort}';
+      _tokenController.clear();
+    }
   }
 
   void _applyDeviceToControllers(PairedDevice device) {
@@ -1149,8 +1253,171 @@ class _TransferHistoryTile extends StatelessWidget {
   }
 }
 
+class _MobileSettingsDialog extends StatefulWidget {
+  const _MobileSettingsDialog({
+    required this.settings,
+    required this.pairedDevices,
+  });
+
+  final MobileAppSettings settings;
+  final List<PairedDevice> pairedDevices;
+
+  @override
+  State<_MobileSettingsDialog> createState() => _MobileSettingsDialogState();
+}
+
+class _MobileSettingsDialogState extends State<_MobileSettingsDialog> {
+  late final TextEditingController _deviceNameController;
+  late final TextEditingController _retentionController;
+  late bool _confirmBeforeSending;
+  late bool _wifiOnly;
+  String? _defaultComputerId;
+
+  @override
+  void initState() {
+    super.initState();
+    _deviceNameController = TextEditingController(
+      text: widget.settings.deviceName,
+    );
+    _retentionController = TextEditingController(
+      text: '${widget.settings.historyRetentionDays}',
+    );
+    _confirmBeforeSending = widget.settings.confirmBeforeSending;
+    _wifiOnly = widget.settings.wifiOnly;
+    _defaultComputerId = widget.settings.defaultComputerId;
+  }
+
+  @override
+  void dispose() {
+    _deviceNameController.dispose();
+    _retentionController.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final retention = int.tryParse(_retentionController.text.trim()) ??
+        widget.settings.historyRetentionDays;
+    final deviceName = _deviceNameController.text.trim();
+    Navigator.of(context).pop(widget.settings.copyWith(
+      deviceName: deviceName.isEmpty
+          ? const MobileAppSettings.defaults().deviceName
+          : deviceName,
+      defaultComputerId: _defaultComputerId,
+      clearDefaultComputerId: _defaultComputerId == null,
+      confirmBeforeSending: _confirmBeforeSending,
+      wifiOnly: _wifiOnly,
+      historyRetentionDays: retention.clamp(1, 3650).toInt(),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selectedDefault = widget.pairedDevices.any(
+      (device) => device.id == _defaultComputerId,
+    )
+        ? _defaultComputerId!
+        : '';
+
+    return AlertDialog(
+      title: const Text('Mobile settings'),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _deviceNameController,
+                decoration: const InputDecoration(
+                  labelText: 'Phone name',
+                  border: OutlineInputBorder(),
+                ),
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: selectedDefault,
+                decoration: const InputDecoration(
+                  labelText: 'Default computer',
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  const DropdownMenuItem<String>(
+                    value: '',
+                    child: Text('First available computer'),
+                  ),
+                  for (final device in widget.pairedDevices)
+                    DropdownMenuItem<String>(
+                      value: device.id,
+                      child: Text(device.deviceName),
+                    ),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    _defaultComputerId = value == null || value.isEmpty
+                        ? null
+                        : value;
+                  });
+                },
+              ),
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                value: _confirmBeforeSending,
+                onChanged: (value) {
+                  setState(() => _confirmBeforeSending = value ?? false);
+                },
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Confirm before sending'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              CheckboxListTile(
+                value: _wifiOnly,
+                onChanged: (value) {
+                  setState(() => _wifiOnly = value ?? false);
+                },
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Send only on Wi-Fi'),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _retentionController,
+                decoration: const InputDecoration(
+                  labelText: 'History retention days',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Notifications use the Android app notification permission.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
 class _PairComputerDialog extends StatefulWidget {
-  const _PairComputerDialog();
+  const _PairComputerDialog({required this.initialDeviceName});
+
+  final String initialDeviceName;
 
   @override
   State<_PairComputerDialog> createState() => _PairComputerDialogState();
@@ -1165,7 +1432,9 @@ class _PairComputerDialogState extends State<_PairComputerDialog> {
   void initState() {
     super.initState();
     _payloadController = TextEditingController();
-    _deviceNameController = TextEditingController(text: 'Android phone');
+    _deviceNameController = TextEditingController(
+      text: widget.initialDeviceName,
+    );
     _hostOverrideController = TextEditingController();
   }
 

@@ -20,6 +20,9 @@ class ReceiverServer {
     required this.trustedDevices,
     required this.pairingCoordinator,
     required this.transferHistory,
+    this.availableDiskSpaceProvider,
+    this.rateLimitMaxRequests = _defaultRateLimitMaxRequests,
+    this.rateLimitWindow = _defaultRateLimitWindow,
   });
 
   final DeviceInfo deviceInfo;
@@ -28,8 +31,14 @@ class ReceiverServer {
   final TrustedDeviceStore trustedDevices;
   final PairingCoordinator pairingCoordinator;
   final TransferRecordRepository transferHistory;
+  final FutureOr<int?> Function(String receiveFolder)?
+      availableDiskSpaceProvider;
+  final int rateLimitMaxRequests;
+  final Duration rateLimitWindow;
 
   final Map<String, TransferRecord> _records = <String, TransferRecord>{};
+  final Map<String, List<DateTime>> _requestTimestamps =
+      <String, List<DateTime>>{};
   final StreamController<TransferRecord> _recordEvents =
       StreamController<TransferRecord>.broadcast();
   HttpServer? _server;
@@ -73,6 +82,19 @@ class ReceiverServer {
 
   Future<void> _handleRequest(HttpRequest request) async {
     try {
+      final remoteAddress =
+          request.connectionInfo?.remoteAddress.address ?? 'unknown';
+      if (_isRateLimited(remoteAddress)) {
+        await _writeError(
+          request.response,
+          429,
+          const ProtocolError(
+            code: ErrorCodes.serverUnavailable,
+            message: 'Too many requests. Try again shortly.',
+          ),
+        );
+        return;
+      }
       if (request.method == 'GET' && request.uri.path == ApiRoutes.device) {
         await _writeJson(request.response, HttpStatus.ok, deviceInfo.toJson());
         return;
@@ -266,6 +288,22 @@ class ReceiverServer {
       return;
     }
 
+    final availableDiskSpace = await _availableDiskSpaceBytes(
+      settings.receiveFolder,
+    );
+    if (availableDiskSpace != null &&
+        availableDiskSpace <
+            transferRequest.fileSize + _diskSpaceSafetyMarginBytes) {
+      await _writeError(
+        request.response,
+        507,
+        const ProtocolError(
+          code: ErrorCodes.insufficientDiskSpace,
+          message: 'The receiver does not have enough free disk space.',
+        ),
+      );
+      return;
+    }
     if (transferRequest.checksumAlgorithm.toUpperCase() !=
         AppConstants.checksumAlgorithm) {
       await _writeError(
@@ -718,6 +756,63 @@ class ReceiverServer {
     return record.status != TransferStatus.uploading;
   }
 
+  bool _isRateLimited(String remoteAddress) {
+    if (rateLimitMaxRequests <= 0) {
+      return false;
+    }
+
+    final now = DateTime.now();
+    final cutoff = now.subtract(rateLimitWindow);
+    final timestamps = _requestTimestamps.putIfAbsent(
+      remoteAddress,
+      () => <DateTime>[],
+    )..removeWhere((timestamp) => timestamp.isBefore(cutoff));
+    if (timestamps.length >= rateLimitMaxRequests) {
+      return true;
+    }
+    timestamps.add(now);
+    return false;
+  }
+
+  Future<int?> _availableDiskSpaceBytes(String receiveFolder) async {
+    final provider = availableDiskSpaceProvider;
+    if (provider != null) {
+      return provider(receiveFolder);
+    }
+    if (!Platform.isWindows) {
+      return null;
+    }
+
+    final driveRoot = _windowsDriveRoot(receiveFolder);
+    if (driveRoot == null) {
+      return null;
+    }
+
+    final escapedRoot = driveRoot.replaceAll("'", "''");
+    try {
+      final result = await Process.run(
+        'powershell.exe',
+        <String>[
+          '-NoProfile',
+          '-Command',
+          "[int64]([System.IO.DriveInfo]::new('$escapedRoot')).AvailableFreeSpace",
+        ],
+      );
+      if (result.exitCode != 0) {
+        return null;
+      }
+      return int.tryParse(result.stdout.toString().trim());
+    } on Object {
+      return null;
+    }
+  }
+
+  String? _windowsDriveRoot(String path) {
+    final absolutePath = Directory(path).absolute.path;
+    final match = RegExp(r'^[A-Za-z]:\\').firstMatch(absolutePath);
+    return match?.group(0);
+  }
+
   int get _activeTransferCount {
     return _records.values
         .where((record) => switch (record.status) {
@@ -774,3 +869,7 @@ class ReceiverServer {
     await response.close();
   }
 }
+
+const _defaultRateLimitMaxRequests = 120;
+const _defaultRateLimitWindow = Duration(minutes: 1);
+const _diskSpaceSafetyMarginBytes = 16 * 1024 * 1024;

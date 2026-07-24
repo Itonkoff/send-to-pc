@@ -1,6 +1,14 @@
 package com.brightonkofu.send_to_pc_mobile
 
+import android.Manifest
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -42,6 +50,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ensureNotificationChannel()
+        requestNotificationPermissionIfNeeded()
         captureIntent(intent)
         emitPendingFiles()
     }
@@ -51,6 +61,8 @@ class MainActivity : FlutterActivity() {
         shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_NAME)
         shareChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
+                "getMobileSettings" -> result.success(loadMobileSettings())
+                "saveMobileSettings" -> result.success(saveMobileSettings(call.arguments))
                 "getInitialSharedFiles" -> result.success(pendingSharedFiles)
                 "getPairedDevices" -> result.success(loadPairedDevices())
                 "discoverPairedDevices" -> discoverPairedDevices(result)
@@ -453,6 +465,10 @@ class MainActivity : FlutterActivity() {
             var failedStartIndex = 0
             try {
                 val args = arguments as? Map<*, *> ?: error("Missing upload arguments.")
+                val mobileSettings = loadMobileSettings()
+                val wifiOnly = (args["wifiOnly"] as? Boolean)
+                    ?: (mobileSettings["wifiOnly"] as? Boolean)
+                    ?: false
                 destination = UploadDestination(
                     host = args["host"] as? String ?: error("Missing host."),
                     port = (args["port"] as? Number)?.toInt() ?: error("Missing port."),
@@ -467,6 +483,10 @@ class MainActivity : FlutterActivity() {
                     error("No files were provided for upload.")
                 }
 
+                if (wifiOnly && !isWifiConnected()) {
+                    error("Wi-Fi only is enabled, but this device is not connected to Wi-Fi.")
+                }
+
                 val uploadDestination = destination ?: error("Missing destination.")
                 files.forEachIndexed { index, file ->
                     failedStartIndex = index
@@ -476,10 +496,19 @@ class MainActivity : FlutterActivity() {
 
                 runOnUiThread { result.success(null) }
             } catch (exception: Exception) {
+                val failedFiles = files.drop(failedStartIndex)
                 saveFailedTransferRecords(
-                    files.drop(failedStartIndex),
+                    failedFiles,
                     destination,
                     exception,
+                )
+                val failedFileName = failedFiles.firstOrNull()?.fileName
+                    ?: files.firstOrNull()?.fileName
+                showTransferNotification(
+                    title = "Transfer failed",
+                    text = failedFileName?.let { "$it could not be sent." }
+                        ?: (exception.message ?: "Upload failed."),
+                    failed = true,
                 )
                 runOnUiThread {
                     result.error(
@@ -507,12 +536,21 @@ class MainActivity : FlutterActivity() {
             currentFileNumber = currentFileNumber,
             totalFileCount = totalFileCount,
         )
+        showTransferNotification(
+            title = "Sending ${file.fileName}",
+            text = "File $currentFileNumber of $totalFileCount is uploading.",
+        )
 
         val checksum = calculateChecksum(file.uri)
         val transfer = createTransfer(destination, file, checksum)
         streamUpload(destination, file, checksum.size, transfer.transferId, currentFileNumber, totalFileCount)
         val completed = completeTransfer(destination, transfer.transferId)
         saveTransferRecord(jsonObjectToMap(completed))
+        showTransferNotification(
+            title = "Transfer complete",
+            text = "${file.fileName} sent to PC.",
+            completed = true,
+        )
 
         emitProgress(
             transferId = transfer.transferId,
@@ -702,6 +740,91 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun ensureNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val existing = manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID)
+        if (existing != null) {
+            return
+        }
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            "Transfers",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "Send to PC transfer updates"
+        }
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        requestPermissions(
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            NOTIFICATION_PERMISSION_REQUEST_CODE,
+        )
+    }
+
+    private fun showTransferNotification(
+        title: String,
+        text: String,
+        completed: Boolean = false,
+        failed: Boolean = false,
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        ensureNotificationChannel()
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val icon = if (failed) {
+            android.R.drawable.ic_dialog_alert
+        } else {
+            android.R.drawable.ic_dialog_info
+        }
+        builder
+            .setSmallIcon(icon)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setAutoCancel(completed || failed)
+            .setOnlyAlertOnce(!completed && !failed)
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(TRANSFER_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun isWifiConnected(): Boolean {
+        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = manager.activeNetwork ?: return false
+            val capabilities = manager.getNetworkCapabilities(network) ?: return false
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } else {
+            @Suppress("DEPRECATION")
+            val info = manager.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            info?.isConnected == true &&
+                info.type == ConnectivityManager.TYPE_WIFI
+        }
+    }
+
     private fun extractSharedFiles(intent: Intent?): List<Map<String, Any?>> {
         if (intent == null) return emptyList()
 
@@ -806,8 +929,60 @@ class MainActivity : FlutterActivity() {
         return loadJsonList(PAIRED_DEVICES_KEY)
     }
 
+    private fun loadMobileSettings(): Map<String, Any?> {
+        val defaults = defaultMobileSettings()
+        val stored = preferences.getString(MOBILE_SETTINGS_KEY, null)
+            ?: return defaults
+        return try {
+            normalizeMobileSettings(jsonObjectToMap(JSONObject(stored)))
+        } catch (exception: Exception) {
+            defaults
+        }
+    }
+
+    private fun saveMobileSettings(arguments: Any?): Map<String, Any?> {
+        val raw = arguments as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        val normalized = normalizeMobileSettings(raw.mapKeys { it.key.toString() })
+        preferences.edit()
+            .putString(MOBILE_SETTINGS_KEY, JSONObject(normalized).toString())
+            .apply()
+        persistTransferHistory(trimTransferHistory(loadJsonList(TRANSFER_HISTORY_KEY)))
+        return normalized
+    }
+
+    private fun defaultMobileSettings(): Map<String, Any?> {
+        return mapOf(
+            "deviceName" to defaultDeviceName(),
+            "defaultComputerId" to null,
+            "confirmBeforeSending" to false,
+            "wifiOnly" to false,
+            "historyRetentionDays" to DEFAULT_HISTORY_RETENTION_DAYS,
+        )
+    }
+
+    private fun normalizeMobileSettings(raw: Map<*, *>): Map<String, Any?> {
+        val defaults = defaultMobileSettings()
+        val deviceName = (raw["deviceName"] as? String)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: defaults["deviceName"] as String
+        val defaultComputerId = (raw["defaultComputerId"] as? String)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        val retentionDays = ((raw["historyRetentionDays"] as? Number)?.toInt()
+            ?: DEFAULT_HISTORY_RETENTION_DAYS)
+            .coerceIn(1, 3650)
+        return mapOf(
+            "deviceName" to deviceName,
+            "defaultComputerId" to defaultComputerId,
+            "confirmBeforeSending" to (raw["confirmBeforeSending"] == true),
+            "wifiOnly" to (raw["wifiOnly"] == true),
+            "historyRetentionDays" to retentionDays,
+        )
+    }
+
     private fun loadTransferHistory(): List<Map<String, Any?>> {
-        return loadJsonList(TRANSFER_HISTORY_KEY)
+        return trimTransferHistory(loadJsonList(TRANSFER_HISTORY_KEY))
     }
 
     private fun savePairedDevice(device: Map<String, Any?>) {
@@ -883,7 +1058,32 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun persistTransferHistory(records: List<Map<String, Any?>>) {
-        persistJsonList(TRANSFER_HISTORY_KEY, records)
+        persistJsonList(TRANSFER_HISTORY_KEY, trimTransferHistory(records))
+    }
+
+    private fun trimTransferHistory(records: List<Map<String, Any?>>): List<Map<String, Any?>> {
+        val retentionDays = (loadMobileSettings()["historyRetentionDays"] as? Number)?.toInt()
+            ?: DEFAULT_HISTORY_RETENTION_DAYS
+        val cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(retentionDays.toLong())
+        return records
+            .filter { record ->
+                val timestamp = parseUtcIsoMillis(
+                    record["completedAt"] ?: record["updatedAt"] ?: record["createdAt"],
+                )
+                timestamp == null || timestamp >= cutoff
+            }
+            .take(MAX_TRANSFER_HISTORY)
+    }
+
+    private fun parseUtcIsoMillis(value: Any?): Long? {
+        val text = value as? String ?: return null
+        return try {
+            val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+            format.timeZone = TimeZone.getTimeZone("UTC")
+            format.parse(text)?.time
+        } catch (exception: Exception) {
+            null
+        }
     }
 
     private fun loadJsonList(key: String): List<Map<String, Any?>> {
@@ -957,8 +1157,10 @@ private const val CHANNEL_NAME = "send_to_pc/share"
 private const val PREFERENCES_NAME = "send_to_pc_mobile"
 private const val PAIRED_DEVICES_KEY = "paired_devices_json"
 private const val TRANSFER_HISTORY_KEY = "transfer_history_json"
+private const val MOBILE_SETTINGS_KEY = "mobile_settings_json"
 private const val LOCAL_DEVICE_ID_KEY = "local_device_id"
 private const val MAX_TRANSFER_HISTORY = 50
+private const val DEFAULT_HISTORY_RETENTION_DAYS = 30
 private const val DEFAULT_BUFFER_SIZE = 64 * 1024
 private const val DEFAULT_RECEIVER_PORT = 45873
 private const val PAIRING_CONNECT_TIMEOUT_MS = 3_000
@@ -967,6 +1169,9 @@ private const val DISCOVERY_CONCURRENCY = 48
 private const val DISCOVERY_CONNECT_TIMEOUT_MS = 450
 private const val DISCOVERY_READ_TIMEOUT_MS = 450
 private const val DISCOVERY_WAIT_SECONDS = 6L
+private const val NOTIFICATION_CHANNEL_ID = "send_to_pc_transfers"
+private const val TRANSFER_NOTIFICATION_ID = 45873
+private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 45874
 
 private data class PairingAttempt(
     val response: JSONObject,

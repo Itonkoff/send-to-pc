@@ -3,6 +3,79 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:shared_models/shared_models.dart';
 
+class MobileAppSettings {
+  const MobileAppSettings({
+    required this.deviceName,
+    this.defaultComputerId,
+    required this.confirmBeforeSending,
+    required this.wifiOnly,
+    required this.historyRetentionDays,
+  });
+
+  const MobileAppSettings.defaults()
+      : deviceName = 'Android phone',
+        defaultComputerId = null,
+        confirmBeforeSending = false,
+        wifiOnly = false,
+        historyRetentionDays = 30;
+
+  final String deviceName;
+  final String? defaultComputerId;
+  final bool confirmBeforeSending;
+  final bool wifiOnly;
+  final int historyRetentionDays;
+
+  MobileAppSettings copyWith({
+    String? deviceName,
+    String? defaultComputerId,
+    bool clearDefaultComputerId = false,
+    bool? confirmBeforeSending,
+    bool? wifiOnly,
+    int? historyRetentionDays,
+  }) {
+    return MobileAppSettings(
+      deviceName: deviceName ?? this.deviceName,
+      defaultComputerId: clearDefaultComputerId
+          ? null
+          : defaultComputerId ?? this.defaultComputerId,
+      confirmBeforeSending:
+          confirmBeforeSending ?? this.confirmBeforeSending,
+      wifiOnly: wifiOnly ?? this.wifiOnly,
+      historyRetentionDays:
+          historyRetentionDays ?? this.historyRetentionDays,
+    );
+  }
+
+  Map<String, Object?> toJson() {
+    return <String, Object?>{
+      'deviceName': deviceName,
+      'defaultComputerId': defaultComputerId,
+      'confirmBeforeSending': confirmBeforeSending,
+      'wifiOnly': wifiOnly,
+      'historyRetentionDays': historyRetentionDays,
+    };
+  }
+
+  factory MobileAppSettings.fromJson(Map<String, dynamic> json) {
+    final deviceName = (json['deviceName'] as String?)?.trim();
+    final defaultComputerId = (json['defaultComputerId'] as String?)?.trim();
+    final retention = json['historyRetentionDays'];
+    return MobileAppSettings(
+      deviceName: deviceName == null || deviceName.isEmpty
+          ? const MobileAppSettings.defaults().deviceName
+          : deviceName,
+      defaultComputerId: defaultComputerId == null || defaultComputerId.isEmpty
+          ? null
+          : defaultComputerId,
+      confirmBeforeSending: json['confirmBeforeSending'] == true,
+      wifiOnly: json['wifiOnly'] == true,
+      historyRetentionDays: retention is num
+          ? retention.toInt().clamp(1, 3650).toInt()
+          : const MobileAppSettings.defaults().historyRetentionDays,
+    );
+  }
+}
+
 class AndroidShareBridge {
   AndroidShareBridge() {
     _channel.setMethodCallHandler(_handleNativeCall);
@@ -17,6 +90,35 @@ class AndroidShareBridge {
   Stream<List<SharedFile>> watchIncomingSharedFiles() => _fileUpdates.stream;
 
   Stream<TransferProgress> watchTransferProgress() => _progressUpdates.stream;
+
+  Future<MobileAppSettings> getMobileSettings() async {
+    try {
+      final result = await _channel.invokeMethod<Object?>('getMobileSettings');
+      if (result is Map) {
+        return MobileAppSettings.fromJson(_mapFromNative(result));
+      }
+      return const MobileAppSettings.defaults();
+    } on MissingPluginException {
+      return const MobileAppSettings.defaults();
+    }
+  }
+
+  Future<MobileAppSettings> saveMobileSettings(
+    MobileAppSettings settings,
+  ) async {
+    try {
+      final result = await _channel.invokeMethod<Object?>(
+        'saveMobileSettings',
+        settings.toJson(),
+      );
+      if (result is Map) {
+        return MobileAppSettings.fromJson(_mapFromNative(result));
+      }
+      return settings;
+    } on MissingPluginException {
+      return settings;
+    }
+  }
 
   Future<List<SharedFile>> getInitialSharedFiles() async {
     try {
@@ -96,6 +198,7 @@ class AndroidShareBridge {
     required int port,
     required String token,
     required List<SharedFile> files,
+    bool wifiOnly = false,
   }) async {
     if (files.isEmpty) {
       return;
@@ -106,6 +209,7 @@ class AndroidShareBridge {
       'port': port,
       'token': token,
       'files': files.map((file) => file.toJson()).toList(growable: false),
+      'wifiOnly': wifiOnly,
     });
   }
 

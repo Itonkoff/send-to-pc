@@ -60,6 +60,7 @@ void main() {
         trustedDevices: trustedDevices,
         pairingCoordinator: pairingCoordinator,
         transferHistory: TransferRecordRepository(appDataPath: directory.path),
+        availableDiskSpaceProvider: (_) async => 1073741824,
       );
       await server.start();
 
@@ -136,6 +137,56 @@ void main() {
       expect(response.statusCode, HttpStatus.serviceUnavailable);
       expect(response.body['code'], ErrorCodes.serverUnavailable);
       expect(harness.server.records, hasLength(1));
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  test('rejects transfer creation when free disk space is too low', () async {
+    final harness = await _startReceiverHarness(
+      availableDiskSpaceBytes: 3,
+    );
+
+    try {
+      final response = await _createTransferResponse(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+      );
+
+      expect(response.statusCode, 507);
+      expect(response.body['code'], ErrorCodes.insufficientDiskSpace);
+      expect(harness.server.records, isEmpty);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  test('rate limits repeated requests from one address', () async {
+    final harness = await _startReceiverHarness(
+      rateLimitMaxRequests: 1,
+    );
+
+    try {
+      await _createTransfer(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+        fileName: 'one.bin',
+      );
+
+      final response = await _createTransferResponse(
+        harness.client,
+        port: harness.server.boundPort!,
+        token: harness.device.authenticationToken,
+        declaredFileSize: 4,
+        fileName: 'two.bin',
+      );
+
+      expect(response.statusCode, 429);
+      expect(response.body['code'], ErrorCodes.serverUnavailable);
     } finally {
       await harness.dispose();
     }
@@ -243,6 +294,9 @@ class _ReceiverHarness {
 Future<_ReceiverHarness> _startReceiverHarness({
   int maximumFileSizeBytes = 1024,
   int maximumConcurrentTransfers = 2,
+  int availableDiskSpaceBytes = 1073741824,
+  int rateLimitMaxRequests = 120,
+  Duration rateLimitWindow = const Duration(minutes: 1),
 }) async {
   final directory = await Directory.systemTemp.createTemp(
     'send_to_pc_receiver_',
@@ -286,6 +340,9 @@ Future<_ReceiverHarness> _startReceiverHarness({
     trustedDevices: trustedDevices,
     pairingCoordinator: pairingCoordinator,
     transferHistory: TransferRecordRepository(appDataPath: directory.path),
+    availableDiskSpaceProvider: (_) async => availableDiskSpaceBytes,
+    rateLimitMaxRequests: rateLimitMaxRequests,
+    rateLimitWindow: rateLimitWindow,
   );
   await server.start();
   return _ReceiverHarness(
