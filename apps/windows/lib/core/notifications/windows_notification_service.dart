@@ -27,6 +27,14 @@ class WindowsNotificationService {
     );
   }
 
+  Future<void> showDiskSpaceWarning(String fileName) {
+    return _showBalloon(
+      title: 'Disk space warning',
+      message: 'Not enough free space to receive $fileName.',
+      icon: 'Warning',
+    );
+  }
+
   Future<void> showPairingRequest({
     required String deviceName,
     required String platform,

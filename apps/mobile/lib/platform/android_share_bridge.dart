@@ -76,6 +76,63 @@ class MobileAppSettings {
   }
 }
 
+class QueuedTransfer {
+  const QueuedTransfer({
+    required this.id,
+    required this.localSharedFileId,
+    required this.fileName,
+    required this.destinationDeviceId,
+    required this.status,
+    required this.bytesTransferred,
+    required this.totalBytes,
+    required this.retryCount,
+    this.lastError,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String localSharedFileId;
+  final String fileName;
+  final String? destinationDeviceId;
+  final String status;
+  final int bytesTransferred;
+  final int totalBytes;
+  final int retryCount;
+  final String? lastError;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  bool get canRetry =>
+      destinationDeviceId != null &&
+      (status == 'failed' ||
+          status == 'retryScheduled' ||
+          status == 'pending');
+
+  factory QueuedTransfer.fromJson(Map<String, dynamic> json) {
+    int intValue(String key) {
+      final value = json[key];
+      return value is num ? value.toInt() : 0;
+    }
+
+    return QueuedTransfer(
+      id: (json['id'] as String?) ?? 'queued-transfer',
+      localSharedFileId: (json['localSharedFileId'] as String?) ?? 'shared-file',
+      fileName: (json['fileName'] as String?) ?? 'Shared file',
+      destinationDeviceId: json['destinationDeviceId'] as String?,
+      status: (json['status'] as String?) ?? 'pending',
+      bytesTransferred: intValue('bytesTransferred'),
+      totalBytes: intValue('totalBytes'),
+      retryCount: intValue('retryCount'),
+      lastError: json['lastError'] as String?,
+      createdAt: DateTime.tryParse((json['createdAt'] as String?) ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      updatedAt: DateTime.tryParse((json['updatedAt'] as String?) ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
+}
+
 class AndroidShareBridge {
   AndroidShareBridge() {
     _channel.setMethodCallHandler(_handleNativeCall);
@@ -86,10 +143,14 @@ class AndroidShareBridge {
       StreamController<List<SharedFile>>.broadcast();
   final StreamController<TransferProgress> _progressUpdates =
       StreamController<TransferProgress>.broadcast();
+  final StreamController<List<QueuedTransfer>> _queueUpdates =
+      StreamController<List<QueuedTransfer>>.broadcast();
 
   Stream<List<SharedFile>> watchIncomingSharedFiles() => _fileUpdates.stream;
 
   Stream<TransferProgress> watchTransferProgress() => _progressUpdates.stream;
+
+  Stream<List<QueuedTransfer>> watchTransferQueue() => _queueUpdates.stream;
 
   Future<MobileAppSettings> getMobileSettings() async {
     try {
@@ -118,6 +179,32 @@ class AndroidShareBridge {
     } on MissingPluginException {
       return settings;
     }
+  }
+
+  Future<List<QueuedTransfer>> getTransferQueue() async {
+    try {
+      final result = await _channel.invokeMethod<Object?>('getTransferQueue');
+      return _decodeQueuedTransfers(result);
+    } on MissingPluginException {
+      return const <QueuedTransfer>[];
+    }
+  }
+
+  Future<void> retryQueuedTransfer(String id) async {
+    try {
+      await _channel.invokeMethod<void>('retryQueuedTransfer', {'id': id});
+    } on MissingPluginException {
+      throw UnsupportedError('Transfer retry is only available on Android.');
+    }
+  }
+
+  Future<void> clearTransferQueue() async {
+    try {
+      await _channel.invokeMethod<void>('clearTransferQueue');
+    } on MissingPluginException {
+      // Non-Android platforms do not provide this channel.
+    }
+    _queueUpdates.add(const <QueuedTransfer>[]);
   }
 
   Future<List<SharedFile>> getInitialSharedFiles() async {
@@ -198,6 +285,7 @@ class AndroidShareBridge {
     required int port,
     required String token,
     required List<SharedFile> files,
+    String? destinationDeviceId,
     bool wifiOnly = false,
   }) async {
     if (files.isEmpty) {
@@ -209,6 +297,7 @@ class AndroidShareBridge {
       'port': port,
       'token': token,
       'files': files.map((file) => file.toJson()).toList(growable: false),
+      'destinationDeviceId': destinationDeviceId,
       'wifiOnly': wifiOnly,
     });
   }
@@ -225,6 +314,7 @@ class AndroidShareBridge {
   Future<void> dispose() async {
     await _fileUpdates.close();
     await _progressUpdates.close();
+    await _queueUpdates.close();
   }
 
   Future<void> _handleNativeCall(MethodCall call) async {
@@ -234,6 +324,9 @@ class AndroidShareBridge {
         break;
       case 'transferProgressUpdated':
         _progressUpdates.add(_decodeProgress(call.arguments));
+        break;
+      case 'transferQueueUpdated':
+        _queueUpdates.add(_decodeQueuedTransfers(call.arguments));
         break;
     }
   }
@@ -275,6 +368,17 @@ class AndroidShareBridge {
         .toList(growable: false);
   }
 
+  List<QueuedTransfer> _decodeQueuedTransfers(Object? value) {
+    if (value is! List) {
+      return const <QueuedTransfer>[];
+    }
+
+    return value
+        .whereType<Map>()
+        .map((raw) => QueuedTransfer.fromJson(_queuedTransferJson(raw)))
+        .toList(growable: false);
+  }
+
   PairedDevice _decodePairedDevice(Object? value) {
     if (value is! Map) {
       throw StateError('The pairing response was not a paired device.');
@@ -302,6 +406,21 @@ class AndroidShareBridge {
       currentFileNumber: intValue('currentFileNumber', 1),
       totalFileCount: intValue('totalFileCount', 1),
     );
+  }
+
+  Map<String, dynamic> _queuedTransferJson(Map raw) {
+    final json = _mapFromNative(raw);
+    for (final key in const <String>[
+      'bytesTransferred',
+      'totalBytes',
+      'retryCount',
+    ]) {
+      final value = json[key];
+      if (value is num) {
+        json[key] = value.toInt();
+      }
+    }
+    return json;
   }
 
   Map<String, dynamic> _transferRecordJson(Map raw) {

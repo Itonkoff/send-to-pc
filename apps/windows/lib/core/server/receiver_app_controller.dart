@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_models/shared_models.dart';
+import 'package:shared_protocol/shared_protocol.dart';
 import 'package:shared_security/shared_security.dart';
 
+import '../logging/app_logger.dart';
 import '../notifications/windows_notification_service.dart';
 import '../pairing/pairing_coordinator.dart';
 import '../settings/receiver_settings.dart';
@@ -25,6 +27,7 @@ class ReceiverAppController extends ChangeNotifier {
     required this.trustedDevices,
     required this.notificationService,
     required this.startupService,
+    required this.logger,
   });
 
   ReceiverSettingsSnapshot settingsSnapshot;
@@ -34,6 +37,7 @@ class ReceiverAppController extends ChangeNotifier {
   final TrustedDeviceStore trustedDevices;
   final WindowsNotificationService notificationService;
   final WindowsStartupService startupService;
+  final AppLogger logger;
 
   late final PairingCoordinator pairingCoordinator;
   late final ReceiverServer server;
@@ -45,6 +49,9 @@ class ReceiverAppController extends ChangeNotifier {
   List<TransferRecord> _records = <TransferRecord>[];
   final Set<String> _notifiedTransferEvents = <String>{};
   final Set<String> _notifiedPairingRequestIds = <String>{};
+  final Set<String> _loggedTransferStatuses = <String>{};
+  final Set<String> _loggedPairingRequestIds = <String>{};
+  final Map<String, int> _lastLoggedProgressBytes = <String, int>{};
 
   bool get isRunning => server.isRunning;
   Object? get startupError => _startupError;
@@ -90,6 +97,7 @@ class ReceiverAppController extends ChangeNotifier {
       trustedDevices: trustedDevices,
       notificationService: WindowsNotificationService(),
       startupService: const WindowsStartupService(),
+      logger: AppLogger(),
     );
 
     final deviceInfo = DeviceInfo(
@@ -116,8 +124,16 @@ class ReceiverAppController extends ChangeNotifier {
       trustedDevices: trustedDevices,
       pairingCoordinator: controller.pairingCoordinator,
       transferHistory: transferHistory,
+      onServerWarning: controller._handleServerWarning,
     );
 
+    unawaited(controller.logger.information(
+      'application_startup',
+      data: <String, Object?>{
+        'deviceId': settings.deviceId,
+        'deviceName': settings.deviceName,
+      },
+    ));
     return controller;
   }
 
@@ -129,11 +145,20 @@ class ReceiverAppController extends ChangeNotifier {
           : addresses;
       _localAddress = _localAddresses.first;
       _recordSubscription = server.recordEvents.listen(_handleRecordChanged);
+      unawaited(logger.information('receiver_start_requested'));
       await server.start();
+      unawaited(logger.information(
+        'receiver_started',
+        data: <String, Object?>{'port': listeningPort},
+      ));
       _records = server.records;
       _startupError = null;
     } on Object catch (error) {
       _startupError = error;
+      unawaited(logger.error(
+        'receiver_start_failed',
+        data: <String, Object?>{'error': error.toString()},
+      ));
     } finally {
       notifyListeners();
     }
@@ -141,10 +166,19 @@ class ReceiverAppController extends ChangeNotifier {
 
   Future<void> startServer() async {
     try {
+      unawaited(logger.information('receiver_start_requested'));
       await server.start();
+      unawaited(logger.information(
+        'receiver_started',
+        data: <String, Object?>{'port': listeningPort},
+      ));
       _startupError = null;
     } on Object catch (error) {
       _startupError = error;
+      unawaited(logger.error(
+        'receiver_start_failed',
+        data: <String, Object?>{'error': error.toString()},
+      ));
     } finally {
       notifyListeners();
     }
@@ -152,16 +186,19 @@ class ReceiverAppController extends ChangeNotifier {
 
   Future<void> stopServer() async {
     await server.stop();
+    unawaited(logger.information('receiver_stopped'));
     notifyListeners();
   }
 
   void _notifyPairingChanged() {
+    _maybeLogPairingRequests();
     _maybeNotifyPairingRequests();
     notifyListeners();
   }
 
   void _handleRecordChanged(TransferRecord record) {
     _records = server.records;
+    _maybeLogTransfer(record);
     _maybeNotifyTransfer(record);
     notifyListeners();
   }
@@ -194,6 +231,71 @@ class ReceiverAppController extends ChangeNotifier {
     }
   }
 
+  void _maybeLogTransfer(TransferRecord record) {
+    final statusKey = '${record.id}:${record.status.jsonName}';
+    final isProgressCheckpoint = record.status == TransferStatus.uploading &&
+        record.bytesTransferred -
+                (_lastLoggedProgressBytes[record.id] ?? 0) >=
+            _progressLogIntervalBytes;
+    if (!isProgressCheckpoint && !_loggedTransferStatuses.add(statusKey)) {
+      return;
+    }
+    if (record.status == TransferStatus.uploading) {
+      _lastLoggedProgressBytes[record.id] = record.bytesTransferred;
+    }
+
+    unawaited(logger.information(
+      'transfer_${record.status.jsonName}',
+      data: <String, Object?>{
+        'transferId': record.id,
+        'senderDeviceId': record.senderDeviceId,
+        'fileName': record.safeFileName,
+        'mimeType': record.mimeType,
+        'fileSize': record.fileSize,
+        'bytesTransferred': record.bytesTransferred,
+        'failureCode': record.failureCode,
+      },
+    ));
+  }
+
+  void _maybeLogPairingRequests() {
+    for (final request in pairingCoordinator.requests) {
+      if (!_loggedPairingRequestIds.add(request.id)) {
+        continue;
+      }
+      unawaited(logger.information(
+        'pairing_request',
+        data: <String, Object?>{
+          'requestId': request.id,
+          'deviceName': request.deviceName,
+          'deviceId': request.deviceId,
+          'platform': request.platform,
+          'remoteAddress': request.remoteAddress,
+          'status': request.status.name,
+        },
+      ));
+    }
+  }
+
+  void _handleServerWarning(String code, String message, String? fileName) {
+    unawaited(logger.warning(
+      'server_warning',
+      data: <String, Object?>{
+        'code': code,
+        'message': message,
+        'fileName': fileName,
+      },
+    ));
+    if (!settingsSnapshot.appSettings.showNotifications) {
+      return;
+    }
+    if (code == ErrorCodes.insufficientDiskSpace) {
+      unawaited(
+        notificationService.showDiskSpaceWarning(fileName ?? 'the file'),
+      );
+    }
+  }
+
   void _maybeNotifyPairingRequests() {
     if (!settingsSnapshot.appSettings.showNotifications) {
       return;
@@ -214,21 +316,34 @@ class ReceiverAppController extends ChangeNotifier {
 
   void createPairingSession() {
     pairingCoordinator.createSession();
+    unawaited(logger.information('pairing_session_created'));
     notifyListeners();
   }
 
   Future<void> approvePairingRequest(String requestId) async {
     await pairingCoordinator.approve(requestId);
+    unawaited(logger.information(
+      'pairing_approved',
+      data: <String, Object?>{'requestId': requestId},
+    ));
     notifyListeners();
   }
 
   void rejectPairingRequest(String requestId) {
     pairingCoordinator.reject(requestId);
+    unawaited(logger.information(
+      'pairing_rejected',
+      data: <String, Object?>{'requestId': requestId},
+    ));
     notifyListeners();
   }
 
   Future<void> revokeDevice(String deviceId) async {
     await trustedDevices.revokeDevice(deviceId);
+    unawaited(logger.warning(
+      'device_revoked',
+      data: <String, Object?>{'deviceId': deviceId},
+    ));
     notifyListeners();
   }
 
@@ -278,6 +393,19 @@ class ReceiverAppController extends ChangeNotifier {
         await startupService.setEnabled(appSettings.startWithWindows);
       }
       settingsSnapshot = nextSnapshot;
+      unawaited(logger.information(
+        'configuration_changed',
+        data: <String, Object?>{
+          'listenPort': appSettings.listenPort,
+          'receiveFolderChanged':
+              appSettings.receiveFolder != previousSettings.receiveFolder,
+          'startWithWindows': appSettings.startWithWindows,
+          'minimizeToTray': appSettings.minimizeToTray,
+          'showNotifications': appSettings.showNotifications,
+          'maximumFileSizeBytes': appSettings.maximumFileSizeBytes,
+          'maximumConcurrentTransfers': appSettings.maximumConcurrentTransfers,
+        },
+      ));
       server.updateSettings(appSettings);
       if (wasRunning) {
         await server.start();
@@ -315,3 +443,5 @@ class ReceiverAppController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+const _progressLogIntervalBytes = 1024 * 1024;

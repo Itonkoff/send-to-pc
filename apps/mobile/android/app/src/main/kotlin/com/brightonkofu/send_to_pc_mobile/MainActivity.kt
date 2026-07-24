@@ -43,6 +43,7 @@ import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
     private val pendingSharedFiles = mutableListOf<Map<String, Any?>>()
+    private val scheduledRetryIds = mutableSetOf<String>()
     private var shareChannel: MethodChannel? = null
     private val preferences by lazy {
         getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE)
@@ -67,6 +68,15 @@ class MainActivity : FlutterActivity() {
                 "getPairedDevices" -> result.success(loadPairedDevices())
                 "discoverPairedDevices" -> discoverPairedDevices(result)
                 "getTransferHistory" -> result.success(loadTransferHistory())
+                "getTransferQueue" -> result.success(publicTransferQueue())
+                "clearTransferQueue" -> {
+                    synchronized(scheduledRetryIds) {
+                        scheduledRetryIds.clear()
+                    }
+                    persistTransferQueue(emptyList())
+                    result.success(null)
+                }
+                "retryQueuedTransfer" -> retryQueuedTransfer(call.arguments, result)
                 "clearTransferHistory" -> {
                     clearTransferHistory()
                     result.success(null)
@@ -85,6 +95,7 @@ class MainActivity : FlutterActivity() {
             }
         }
         emitPendingFiles()
+        schedulePersistedQueueRetries()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -473,6 +484,9 @@ class MainActivity : FlutterActivity() {
                     host = args["host"] as? String ?: error("Missing host."),
                     port = (args["port"] as? Number)?.toInt() ?: error("Missing port."),
                     token = args["token"] as? String ?: error("Missing token."),
+                    deviceId = (args["destinationDeviceId"] as? String)
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() },
                 )
                 files = (args["files"] as? List<*>)
                     ?.mapNotNull { it as? Map<*, *> }
@@ -488,9 +502,19 @@ class MainActivity : FlutterActivity() {
                 }
 
                 val uploadDestination = destination ?: error("Missing destination.")
+                val queueIds = files.map { file ->
+                    enqueueTransfer(file, uploadDestination)
+                }
                 files.forEachIndexed { index, file ->
                     failedStartIndex = index
-                    uploadOneFile(uploadDestination, file, index + 1, files.size)
+                    val completedBytes = uploadOneFile(
+                        uploadDestination,
+                        file,
+                        index + 1,
+                        files.size,
+                        queueIds[index],
+                    )
+                    markQueuedTransferCompleted(queueIds[index], completedBytes)
                     failedStartIndex = index + 1
                 }
 
@@ -502,6 +526,7 @@ class MainActivity : FlutterActivity() {
                     destination,
                     exception,
                 )
+                markFailedQueueRecords(failedFiles, destination, exception)
                 val failedFileName = failedFiles.firstOrNull()?.fileName
                     ?: files.firstOrNull()?.fileName
                 showTransferNotification(
@@ -526,7 +551,8 @@ class MainActivity : FlutterActivity() {
         file: SharedUploadFile,
         currentFileNumber: Int,
         totalFileCount: Int,
-    ) {
+        queueId: String? = null,
+    ): Long {
         emitProgress(
             transferId = "pending",
             fileName = file.fileName,
@@ -542,8 +568,17 @@ class MainActivity : FlutterActivity() {
         )
 
         val checksum = calculateChecksum(file.uri)
+        updateQueuedTransferProgress(queueId, 0L, checksum.size, "uploading")
         val transfer = createTransfer(destination, file, checksum)
-        streamUpload(destination, file, checksum.size, transfer.transferId, currentFileNumber, totalFileCount)
+        streamUpload(
+            destination,
+            file,
+            checksum.size,
+            transfer.transferId,
+            currentFileNumber,
+            totalFileCount,
+            queueId,
+        )
         val completed = completeTransfer(destination, transfer.transferId)
         saveTransferRecord(jsonObjectToMap(completed))
         showTransferNotification(
@@ -561,6 +596,7 @@ class MainActivity : FlutterActivity() {
             currentFileNumber = currentFileNumber,
             totalFileCount = totalFileCount,
         )
+        return checksum.size
     }
 
     private fun calculateChecksum(uri: Uri): ChecksumResult {
@@ -621,6 +657,7 @@ class MainActivity : FlutterActivity() {
         transferId: String,
         currentFileNumber: Int,
         totalFileCount: Int,
+        queueId: String? = null,
     ) {
         val connection = openConnection(
             destination,
@@ -653,6 +690,12 @@ class MainActivity : FlutterActivity() {
                             status = "uploading",
                             currentFileNumber = currentFileNumber,
                             totalFileCount = totalFileCount,
+                        )
+                        updateQueuedTransferProgress(
+                            queueId,
+                            transferred,
+                            size,
+                            "uploading",
                         )
                     }
                 }
@@ -715,6 +758,12 @@ class MainActivity : FlutterActivity() {
 
     private fun emitPendingFiles() {
         shareChannel?.invokeMethod("sharedFilesUpdated", pendingSharedFiles)
+    }
+
+    private fun emitTransferQueue() {
+        runOnUiThread {
+            shareChannel?.invokeMethod("transferQueueUpdated", publicTransferQueue())
+        }
     }
 
     private fun emitProgress(
@@ -1008,7 +1057,268 @@ class MainActivity : FlutterActivity() {
         persistJsonList(PAIRED_DEVICES_KEY, devices)
     }
 
+    private fun retryQueuedTransfer(arguments: Any?, result: MethodChannel.Result) {
+        Thread {
+            try {
+                val args = arguments as? Map<*, *> ?: error("Missing retry arguments.")
+                val id = args["id"] as? String ?: error("Missing queued transfer id.")
+                retryQueuedTransferInternal(id, manual = true)
+                runOnUiThread { result.success(null) }
+            } catch (exception: Exception) {
+                runOnUiThread {
+                    result.error(
+                        "RETRY_FAILED",
+                        exception.message ?: "Retry failed.",
+                        null,
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun retryQueuedTransferInternal(id: String, manual: Boolean) {
+        val record = loadTransferQueue().firstOrNull { it["id"] == id }
+            ?: error("Queued transfer was not found.")
+        if (record["status"] == "completed") {
+            return
+        }
+        val retryCount = ((record["retryCount"] as? Number)?.toInt() ?: 0) + 1
+        val file = SharedUploadFile.fromMap(
+            record["file"] as? Map<*, *> ?: error("Queued file metadata is missing."),
+        )
+        val destination = resolveQueuedDestination(record)
+        updateQueueRecord(id) { current ->
+            current.apply {
+                put("status", "uploading")
+                put("retryCount", retryCount)
+                put("lastError", null)
+                put("updatedAt", utcNowIso())
+            }
+        }
+
+        try {
+            val completedBytes = uploadOneFile(destination, file, 1, 1, id)
+            markQueuedTransferCompleted(id, completedBytes)
+        } catch (exception: Exception) {
+            markQueuedTransferFailed(id, exception)
+            if (!manual && isConnectionFailure(exception) && retryCount < MAX_QUEUE_RETRIES) {
+                scheduleQueuedRetry(id)
+            }
+            throw exception
+        }
+    }
+
+    private fun resolveQueuedDestination(record: Map<String, Any?>): UploadDestination {
+        val destinationDeviceId = record["destinationDeviceId"] as? String
+            ?: error("Queued transfer is missing a destination device.")
+        val device = loadPairedDevices().firstOrNull { candidate ->
+            candidate["id"] == destinationDeviceId ||
+                candidate["deviceId"] == destinationDeviceId
+        } ?: error("The destination computer is no longer paired.")
+        val host = device["lastKnownAddress"] as? String
+            ?: error("The destination computer has no saved address.")
+        val token = device["authenticationToken"] as? String
+            ?: error("The destination computer has no trusted token.")
+        return UploadDestination(
+            host = host,
+            port = devicePort(device),
+            token = token,
+            deviceId = destinationDeviceId,
+        )
+    }
+
+    private fun enqueueTransfer(
+        file: SharedUploadFile,
+        destination: UploadDestination,
+    ): String {
+        val now = utcNowIso()
+        val id = "queue-${System.currentTimeMillis()}-${file.id.hashCode()}"
+        val record = mapOf(
+            "id" to id,
+            "localSharedFileId" to file.id,
+            "fileName" to file.fileName,
+            "destinationDeviceId" to destination.deviceId,
+            "status" to "pending",
+            "bytesTransferred" to 0L,
+            "totalBytes" to (file.size ?: 0L),
+            "retryCount" to 0,
+            "lastError" to null,
+            "createdAt" to now,
+            "updatedAt" to now,
+            "file" to sharedFileToQueueMap(file),
+        )
+        val records = loadTransferQueue().toMutableList()
+        records.add(0, record)
+        persistTransferQueue(records.take(MAX_TRANSFER_QUEUE))
+        return id
+    }
+
+    private fun markFailedQueueRecords(
+        files: List<SharedUploadFile>,
+        destination: UploadDestination?,
+        exception: Exception,
+    ) {
+        if (files.isEmpty()) {
+            return
+        }
+        val transient = isConnectionFailure(exception)
+        files.forEach { file ->
+            val queueId = findQueuedTransferId(file, destination)
+                ?: destination?.let { enqueueTransfer(file, it) }
+                ?: return@forEach
+            markQueuedTransferFailed(queueId, exception)
+            if (transient) {
+                scheduleQueuedRetry(queueId)
+            }
+        }
+    }
+
+    private fun findQueuedTransferId(
+        file: SharedUploadFile,
+        destination: UploadDestination?,
+    ): String? {
+        return loadTransferQueue().firstOrNull { record ->
+            record["localSharedFileId"] == file.id &&
+                (destination?.deviceId == null ||
+                    record["destinationDeviceId"] == destination.deviceId) &&
+                record["status"] != "completed"
+        }?.get("id") as? String
+    }
+
+    private fun markQueuedTransferCompleted(id: String, totalBytes: Long) {
+        updateQueueRecord(id) { current ->
+            current.apply {
+                put("status", "completed")
+                put("bytesTransferred", totalBytes)
+                put("totalBytes", totalBytes)
+                put("lastError", null)
+                put("updatedAt", utcNowIso())
+            }
+        }
+    }
+
+    private fun markQueuedTransferFailed(id: String, exception: Exception) {
+        updateQueueRecord(id) { current ->
+            current.apply {
+                put("status", "failed")
+                put("lastError", exception.message ?: "Upload failed.")
+                put("updatedAt", utcNowIso())
+            }
+        }
+    }
+
+    private fun scheduleQueuedRetry(id: String) {
+        val record = loadTransferQueue().firstOrNull { it["id"] == id } ?: return
+        val destinationDeviceId = record["destinationDeviceId"] as? String ?: return
+        val retryCount = (record["retryCount"] as? Number)?.toInt() ?: 0
+        if (retryCount >= MAX_QUEUE_RETRIES || destinationDeviceId.isBlank()) {
+            return
+        }
+        synchronized(scheduledRetryIds) {
+            if (!scheduledRetryIds.add(id)) {
+                return
+            }
+        }
+        val delay = queueRetryDelay(retryCount)
+        updateQueueRecord(id) { current ->
+            current.apply {
+                put("status", "retryScheduled")
+                put("updatedAt", utcNowIso())
+            }
+        }
+        showTransferNotification(
+            title = "Retry scheduled",
+            text = "${record["fileName"] ?: "Shared file"} will retry shortly.",
+        )
+        Thread {
+            try {
+                Thread.sleep(delay)
+                val currentStatus = loadTransferQueue()
+                    .firstOrNull { it["id"] == id }
+                    ?.get("status")
+                if (currentStatus == "retryScheduled") {
+                    retryQueuedTransferInternal(id, manual = false)
+                }
+            } catch (ignored: Exception) {
+                // The queue record already stores the failed state.
+            } finally {
+                synchronized(scheduledRetryIds) {
+                    scheduledRetryIds.remove(id)
+                }
+            }
+        }.start()
+    }
+
+    private fun schedulePersistedQueueRetries() {
+        loadTransferQueue()
+            .filter { it["status"] == "retryScheduled" }
+            .mapNotNull { it["id"] as? String }
+            .forEach { id -> scheduleQueuedRetry(id) }
+    }
+
+    private fun queueRetryDelay(retryCount: Int): Long {
+        val index = retryCount.coerceIn(0, QUEUE_RETRY_DELAYS_MS.lastIndex)
+        return QUEUE_RETRY_DELAYS_MS[index]
+    }
+
+    private fun updateQueuedTransferProgress(
+        id: String?,
+        bytesTransferred: Long,
+        totalBytes: Long,
+        status: String,
+    ) {
+        if (id == null) {
+            return
+        }
+        updateQueueRecord(id) { current ->
+            current.apply {
+                put("status", status)
+                put("bytesTransferred", bytesTransferred)
+                put("totalBytes", totalBytes)
+                put("updatedAt", utcNowIso())
+            }
+        }
+    }
+
+    private fun updateQueueRecord(
+        id: String,
+        update: (MutableMap<String, Any?>) -> Map<String, Any?>,
+    ) {
+        val records = loadTransferQueue().toMutableList()
+        val index = records.indexOfFirst { it["id"] == id }
+        if (index < 0) {
+            return
+        }
+        records[index] = update(records[index].toMutableMap())
+        persistTransferQueue(records.take(MAX_TRANSFER_QUEUE))
+    }
+
+    private fun loadTransferQueue(): List<Map<String, Any?>> {
+        return loadJsonList(TRANSFER_QUEUE_KEY)
+    }
+
+    private fun persistTransferQueue(records: List<Map<String, Any?>>) {
+        persistJsonList(TRANSFER_QUEUE_KEY, records.take(MAX_TRANSFER_QUEUE))
+        emitTransferQueue()
+    }
+
+    private fun publicTransferQueue(): List<Map<String, Any?>> {
+        return loadTransferQueue().map { record ->
+            record.filterKeys { key -> key != "file" }
+        }
+    }
+
+    private fun sharedFileToQueueMap(file: SharedUploadFile): Map<String, Any?> {
+        return mapOf(
+            "id" to file.id,
+            "uri" to file.uri.toString(),
+            "fileName" to file.fileName,
+            "mimeType" to file.mimeType,
+            "size" to file.size,
+        )
+    }
     private fun saveFailedTransferRecords(
+
         files: List<SharedUploadFile>,
         destination: UploadDestination?,
         exception: Exception,
@@ -1112,10 +1422,26 @@ class MainActivity : FlutterActivity() {
         val keys = json.keys()
         while (keys.hasNext()) {
             val key = keys.next()
-            val value = json.opt(key)
-            result[key] = if (value == JSONObject.NULL) null else value
+            result[key] = jsonValueToKotlin(json.opt(key))
         }
         return result
+    }
+
+    private fun jsonArrayToList(json: JSONArray): List<Any?> {
+        val result = mutableListOf<Any?>()
+        for (index in 0 until json.length()) {
+            result.add(jsonValueToKotlin(json.opt(index)))
+        }
+        return result
+    }
+
+    private fun jsonValueToKotlin(value: Any?): Any? {
+        return when (value) {
+            null, JSONObject.NULL -> null
+            is JSONObject -> jsonObjectToMap(value)
+            is JSONArray -> jsonArrayToList(value)
+            else -> value
+        }
     }
 
     private fun localDeviceId(): String {
@@ -1157,9 +1483,12 @@ private const val CHANNEL_NAME = "send_to_pc/share"
 private const val PREFERENCES_NAME = "send_to_pc_mobile"
 private const val PAIRED_DEVICES_KEY = "paired_devices_json"
 private const val TRANSFER_HISTORY_KEY = "transfer_history_json"
+private const val TRANSFER_QUEUE_KEY = "transfer_queue_json"
 private const val MOBILE_SETTINGS_KEY = "mobile_settings_json"
 private const val LOCAL_DEVICE_ID_KEY = "local_device_id"
 private const val MAX_TRANSFER_HISTORY = 50
+private const val MAX_TRANSFER_QUEUE = 50
+private const val MAX_QUEUE_RETRIES = 5
 private const val DEFAULT_HISTORY_RETENTION_DAYS = 30
 private const val DEFAULT_BUFFER_SIZE = 64 * 1024
 private const val DEFAULT_RECEIVER_PORT = 45873
@@ -1172,6 +1501,7 @@ private const val DISCOVERY_WAIT_SECONDS = 6L
 private const val NOTIFICATION_CHANNEL_ID = "send_to_pc_transfers"
 private const val TRANSFER_NOTIFICATION_ID = 45873
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 45874
+private val QUEUE_RETRY_DELAYS_MS = longArrayOf(2_000L, 5_000L, 10_000L, 30_000L, 60_000L)
 
 private data class PairingAttempt(
     val response: JSONObject,
@@ -1189,9 +1519,11 @@ private data class UploadDestination(
     val host: String,
     val port: Int,
     val token: String,
+    val deviceId: String? = null,
 )
 
 private data class SharedUploadFile(
+    val id: String,
     val uri: Uri,
     val fileName: String,
     val mimeType: String,
@@ -1200,6 +1532,8 @@ private data class SharedUploadFile(
     companion object {
         fun fromMap(map: Map<*, *>): SharedUploadFile {
             return SharedUploadFile(
+                id = map["id"] as? String
+                    ?: "shared-${System.currentTimeMillis()}-${map.hashCode()}",
                 uri = Uri.parse(map["uri"] as? String ?: error("Missing file URI.")),
                 fileName = map["fileName"] as? String ?: "shared-file",
                 mimeType = map["mimeType"] as? String ?: "application/octet-stream",

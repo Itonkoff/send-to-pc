@@ -23,6 +23,7 @@ class ReceiverServer {
     this.availableDiskSpaceProvider,
     this.rateLimitMaxRequests = _defaultRateLimitMaxRequests,
     this.rateLimitWindow = _defaultRateLimitWindow,
+    this.onServerWarning,
   });
 
   final DeviceInfo deviceInfo;
@@ -35,6 +36,8 @@ class ReceiverServer {
       availableDiskSpaceProvider;
   final int rateLimitMaxRequests;
   final Duration rateLimitWindow;
+  final void Function(String code, String message, String? fileName)?
+      onServerWarning;
 
   final Map<String, TransferRecord> _records = <String, TransferRecord>{};
   final Map<String, List<DateTime>> _requestTimestamps =
@@ -294,12 +297,18 @@ class ReceiverServer {
     if (availableDiskSpace != null &&
         availableDiskSpace <
             transferRequest.fileSize + _diskSpaceSafetyMarginBytes) {
+      const message = 'The receiver does not have enough free disk space.';
+      onServerWarning?.call(
+        ErrorCodes.insufficientDiskSpace,
+        message,
+        transferRequest.fileName,
+      );
       await _writeError(
         request.response,
         507,
         const ProtocolError(
           code: ErrorCodes.insufficientDiskSpace,
-          message: 'The receiver does not have enough free disk space.',
+          message: message,
         ),
       );
       return;

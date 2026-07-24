@@ -21,9 +21,11 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   late final TextEditingController _tokenController;
   StreamSubscription<List<SharedFile>>? _shareSubscription;
   StreamSubscription<TransferProgress>? _progressSubscription;
+  StreamSubscription<List<QueuedTransfer>>? _queueSubscription;
   List<SharedFile> _sharedFiles = const <SharedFile>[];
   List<PairedDevice> _pairedDevices = const <PairedDevice>[];
   List<TransferRecord> _transferHistory = const <TransferRecord>[];
+  List<QueuedTransfer> _transferQueue = const <QueuedTransfer>[];
   MobileAppSettings _settings = const MobileAppSettings.defaults();
   TransferProgress? _progress;
   String? _selectedDeviceId;
@@ -50,10 +52,16 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         setState(() => _progress = progress);
       }
     });
+    _queueSubscription = _shareBridge.watchTransferQueue().listen((queue) {
+      if (mounted) {
+        setState(() => _transferQueue = queue);
+      }
+    });
     unawaited(_loadInitialFiles());
     unawaited(_loadSettings());
     unawaited(_loadPairedDevices());
     unawaited(_loadTransferHistory());
+    unawaited(_loadTransferQueue());
   }
 
   Future<void> _loadSettings() async {
@@ -94,6 +102,13 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     }
   }
 
+  Future<void> _loadTransferQueue() async {
+    final records = await _shareBridge.getTransferQueue();
+    if (mounted) {
+      setState(() => _transferQueue = records);
+    }
+  }
+
   @override
   void dispose() {
     _hostController.dispose();
@@ -101,6 +116,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     _tokenController.dispose();
     unawaited(_shareSubscription?.cancel());
     unawaited(_progressSubscription?.cancel());
+    unawaited(_queueSubscription?.cancel());
     unawaited(_shareBridge.dispose());
     super.dispose();
   }
@@ -117,6 +133,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     );
     final hasPairedComputers = _pairedDevices.isNotEmpty;
     final latestCompleted = _latestCompletedRecord(_transferHistory);
+    final visibleQueue = _visibleQueuedTransfers(_transferQueue);
     final visibleCompleted = latestCompleted?.id == _dismissedCompletedTransferId
         ? null
         : latestCompleted;
@@ -225,6 +242,14 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
                     visibleCompleted == null ? null : _dismissCompletedTransfer,
               ),
             ],
+            if (visibleQueue.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _TransferQueueCard(
+                records: visibleQueue,
+                onRetry: controlsEnabled ? _retryQueuedTransfer : null,
+                onClear: controlsEnabled ? _clearTransferQueue : null,
+              ),
+            ],
             const SizedBox(height: 20),
             _RecentTransfersCard(
               records: _transferHistory,
@@ -242,6 +267,10 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     final host = _hostController.text.trim();
     final port = int.tryParse(_portController.text.trim());
     final token = _tokenController.text.trim();
+    final selectedDevice = _selectedPairedDevice(
+      _pairedDevices,
+      _selectedDeviceId,
+    );
 
     if (host.isEmpty || port == null || port <= 0 || port > 65535 || token.isEmpty) {
       setState(() => _lastError = 'Enter a PC host, port, and device token.');
@@ -267,24 +296,29 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         port: port,
         token: token,
         files: _sharedFiles,
+        destinationDeviceId: selectedDevice?.id,
         wifiOnly: _settings.wifiOnly,
       );
       await _shareBridge.clearSharedFiles();
       final history = await _shareBridge.getTransferHistory();
+      final queue = await _shareBridge.getTransferQueue();
       if (mounted) {
         setState(() {
           _sharedFiles = const <SharedFile>[];
           _transferHistory = history;
+          _transferQueue = queue;
           _progress = null;
           _dismissedCompletedTransferId = null;
         });
       }
     } on Object catch (error) {
       final history = await _shareBridge.getTransferHistory();
+      final queue = await _shareBridge.getTransferQueue();
       if (mounted) {
         setState(() {
           _lastError = _errorMessage(error);
           _transferHistory = history;
+          _transferQueue = queue;
           _progress = null;
           _dismissedCompletedTransferId = null;
         });
@@ -491,6 +525,49 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     }
   }
 
+  Future<void> _retryQueuedTransfer(QueuedTransfer queued) async {
+    setState(() {
+      _isSending = true;
+      _lastError = null;
+      _progress = null;
+    });
+
+    try {
+      await _shareBridge.retryQueuedTransfer(queued.id);
+      final history = await _shareBridge.getTransferHistory();
+      final queue = await _shareBridge.getTransferQueue();
+      if (mounted) {
+        setState(() {
+          _transferHistory = history;
+          _transferQueue = queue;
+          _dismissedCompletedTransferId = null;
+        });
+      }
+    } on Object catch (error) {
+      final history = await _shareBridge.getTransferHistory();
+      final queue = await _shareBridge.getTransferQueue();
+      if (mounted) {
+        setState(() {
+          _lastError = _errorMessage(error);
+          _transferHistory = history;
+          _transferQueue = queue;
+          _progress = null;
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
+    }
+  }
+
+  Future<void> _clearTransferQueue() async {
+    await _shareBridge.clearTransferQueue();
+    if (mounted) {
+      setState(() => _transferQueue = const <QueuedTransfer>[]);
+    }
+  }
+
   void _dismissCompletedTransfer() {
     final completed = _latestCompletedRecord(_transferHistory);
     if (completed == null) {
@@ -547,6 +624,12 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       }
     }
     return null;
+  }
+
+  List<QueuedTransfer> _visibleQueuedTransfers(List<QueuedTransfer> records) {
+    return records
+        .where((record) => record.status != 'completed')
+        .toList(growable: false);
   }
 
   TransferRecord? _latestCompletedRecord(List<TransferRecord> records) {
@@ -1125,6 +1208,151 @@ class _ErrorCard extends StatelessWidget {
   }
 }
 
+class _TransferQueueCard extends StatelessWidget {
+  const _TransferQueueCard({
+    required this.records,
+    required this.onRetry,
+    required this.onClear,
+  });
+
+  final List<QueuedTransfer> records;
+  final ValueChanged<QueuedTransfer>? onRetry;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.low_priority, color: theme.colorScheme.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Pending transfers',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Clear pending transfers',
+                  onPressed: onClear,
+                  icon: const Icon(Icons.clear_all_outlined),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            for (final record in records.take(5))
+              _QueuedTransferTile(
+                record: record,
+                onRetry: onRetry,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _QueuedTransferTile extends StatelessWidget {
+  const _QueuedTransferTile({
+    required this.record,
+    required this.onRetry,
+  });
+
+  final QueuedTransfer record;
+  final ValueChanged<QueuedTransfer>? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final totalBytes = record.totalBytes;
+    final progress = totalBytes <= 0
+        ? null
+        : (record.bytesTransferred / totalBytes).clamp(0.0, 1.0).toDouble();
+    final canRetry = onRetry != null && record.canRetry;
+    final retryText = record.retryCount <= 0
+        ? ''
+        : ' - Retry ${record.retryCount}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                _queuedTransferIcon(record.status),
+                size: 20,
+                color: _queuedTransferColor(theme, record.status),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  record.fileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _queuedTransferStatusLabel(record.status),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: _queuedTransferColor(theme, record.status),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          if (progress != null) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: progress),
+          ],
+          const SizedBox(height: 4),
+          Text(
+            '${_formatBytes(record.bytesTransferred)} of '
+            '${_formatBytes(record.totalBytes)}$retryText',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          if (record.lastError != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              record.lastError!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ],
+          if (canRetry) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: () => onRetry?.call(record),
+                icon: const Icon(Icons.refresh_outlined),
+                label: const Text('Retry now'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _RecentTransfersCard extends StatelessWidget {
   const _RecentTransfersCard({
     required this.records,
@@ -1668,6 +1896,34 @@ Color _transferStatusColor(ThemeData theme, TransferStatus status) {
     TransferStatus.cancelled => theme.colorScheme.onSurfaceVariant,
     TransferStatus.uploading || TransferStatus.verifying =>
       theme.colorScheme.primary,
+    _ => theme.colorScheme.onSurfaceVariant,
+  };
+}
+
+String _queuedTransferStatusLabel(String status) {
+  return switch (status) {
+    'retryScheduled' => 'waiting',
+    'uploading' => 'uploading',
+    'failed' => 'failed',
+    'pending' => 'pending',
+    _ => status,
+  };
+}
+
+IconData _queuedTransferIcon(String status) {
+  return switch (status) {
+    'retryScheduled' => Icons.schedule_outlined,
+    'uploading' => Icons.sync,
+    'failed' => Icons.error_outline,
+    _ => Icons.low_priority,
+  };
+}
+
+Color _queuedTransferColor(ThemeData theme, String status) {
+  return switch (status) {
+    'retryScheduled' => theme.colorScheme.tertiary,
+    'uploading' => theme.colorScheme.primary,
+    'failed' => theme.colorScheme.error,
     _ => theme.colorScheme.onSurfaceVariant,
   };
 }
