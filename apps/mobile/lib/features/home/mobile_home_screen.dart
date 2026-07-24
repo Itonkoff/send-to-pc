@@ -297,6 +297,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
         token: token,
         files: _sharedFiles,
         destinationDeviceId: selectedDevice?.id,
+        certificateFingerprint: selectedDevice?.certificateFingerprint,
         wifiOnly: _settings.wifiOnly,
       );
       await _shareBridge.clearSharedFiles();

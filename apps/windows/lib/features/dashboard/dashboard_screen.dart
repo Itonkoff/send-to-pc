@@ -211,7 +211,7 @@ class _ReceiverCard extends StatelessWidget {
             _InfoRow(
               icon: Icons.router_outlined,
               label: 'Local endpoint',
-              value: 'http://${controller.localAddress}:'
+              value: '${controller.endpointScheme}://${controller.localAddress}:'
                   '${controller.listeningPort}/api/v1',
             ),
             const SizedBox(height: 12),

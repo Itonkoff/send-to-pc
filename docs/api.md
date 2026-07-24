@@ -26,9 +26,9 @@ Example body:
 }
 ```
 
-The same versioned pairing payload is rendered as a QR code in the Windows app and remains available as copyable JSON for emulator/manual testing.
+The same versioned pairing payload is rendered as a QR code in the Windows app and remains available as copyable JSON for emulator/manual testing. It includes the receiver certificate fingerprint used by Android for HTTPS pinning.
 
-The HTTP request waits until the Windows user approves or rejects it. Approval returns a per-device token that is stored by the receiver and should be stored by the sender.
+The pairing request waits until the Windows user approves or rejects it. Approval returns a per-device token that is stored by the receiver and should be stored by the sender.
 
 ## Transfers
 

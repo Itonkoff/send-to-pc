@@ -23,6 +23,7 @@ class ReceiverServer {
     this.availableDiskSpaceProvider,
     this.rateLimitMaxRequests = _defaultRateLimitMaxRequests,
     this.rateLimitWindow = _defaultRateLimitWindow,
+    this.securityContextProvider,
     this.onServerWarning,
   });
 
@@ -36,6 +37,7 @@ class ReceiverServer {
       availableDiskSpaceProvider;
   final int rateLimitMaxRequests;
   final Duration rateLimitWindow;
+  final FutureOr<SecurityContext?> Function()? securityContextProvider;
   final void Function(String code, String message, String? fileName)?
       onServerWarning;
 
@@ -45,9 +47,11 @@ class ReceiverServer {
   final StreamController<TransferRecord> _recordEvents =
       StreamController<TransferRecord>.broadcast();
   HttpServer? _server;
+  var _isSecure = false;
 
   bool get isRunning => _server != null;
   int? get boundPort => _server?.port;
+  bool get isSecure => _isSecure;
   List<TransferRecord> get records => List.unmodifiable(_records.values);
   Stream<TransferRecord> get recordEvents => _recordEvents.stream;
 
@@ -60,16 +64,28 @@ class ReceiverServer {
     if (_records.isEmpty) {
       await _loadPersistedRecords();
     }
-    _server = await HttpServer.bind(
-      InternetAddress.anyIPv4,
-      settings.listenPort,
-    );
+    final securityContext = await securityContextProvider?.call();
+    if (securityContext == null) {
+      _server = await HttpServer.bind(
+        InternetAddress.anyIPv4,
+        settings.listenPort,
+      );
+      _isSecure = false;
+    } else {
+      _server = await HttpServer.bindSecure(
+        InternetAddress.anyIPv4,
+        settings.listenPort,
+        securityContext,
+      );
+      _isSecure = true;
+    }
     unawaited(_server!.forEach(_handleRequest));
   }
 
   Future<void> stop() async {
     final server = _server;
     _server = null;
+    _isSecure = false;
     await server?.close(force: true);
   }
 

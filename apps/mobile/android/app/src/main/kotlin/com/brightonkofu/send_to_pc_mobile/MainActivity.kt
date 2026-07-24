@@ -29,6 +29,8 @@ import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.URL
+import java.security.cert.CertificateException
+import java.security.cert.X509Certificate
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -38,6 +40,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -182,8 +189,12 @@ class MainActivity : FlutterActivity() {
         port: Int,
         phoneName: String,
     ): JSONObject {
-        val connection = URL("http", host, port, "/api/v1/pairing/request")
-            .openConnection() as HttpURLConnection
+        val connection = openPinnedConnection(
+            host,
+            port,
+            "/api/v1/pairing/request",
+            optionalString(payload, "certificateFingerprint"),
+        )
         connection.requestMethod = "POST"
         connection.connectTimeout = PAIRING_CONNECT_TIMEOUT_MS
         connection.readTimeout = 360_000
@@ -278,6 +289,7 @@ class MainActivity : FlutterActivity() {
             "deviceId" to expectedDeviceId,
             "lastKnownAddress" to requestedHost,
             "lastKnownPort" to port,
+            "certificateFingerprint" to optionalString(payload, "certificateFingerprint"),
         )
         return discoverDevice(device, pairingDiscoveryCandidates(requestedHost), port)
     }
@@ -354,7 +366,11 @@ class MainActivity : FlutterActivity() {
             executor.execute {
                 try {
                     if (match.get() == null) {
-                        val info = probeDevice(host, port)
+                        val info = probeDevice(
+                            host,
+                            port,
+                            device["certificateFingerprint"] as? String,
+                        )
                         if (info?.optString("deviceId") == expectedDeviceId) {
                             match.compareAndSet(
                                 null,
@@ -378,11 +394,19 @@ class MainActivity : FlutterActivity() {
         return match.get()
     }
 
-    private fun probeDevice(host: String, port: Int): JSONObject? {
+    private fun probeDevice(
+        host: String,
+        port: Int,
+        certificateFingerprint: String?,
+    ): JSONObject? {
         var connection: HttpURLConnection? = null
         return try {
-            connection = URL("http", host, port, "/api/v1/device")
-                .openConnection() as HttpURLConnection
+            connection = openPinnedConnection(
+                host,
+                port,
+                "/api/v1/device",
+                certificateFingerprint,
+            )
             connection.requestMethod = "GET"
             connection.connectTimeout = DISCOVERY_CONNECT_TIMEOUT_MS
             connection.readTimeout = DISCOVERY_READ_TIMEOUT_MS
@@ -485,6 +509,9 @@ class MainActivity : FlutterActivity() {
                     port = (args["port"] as? Number)?.toInt() ?: error("Missing port."),
                     token = args["token"] as? String ?: error("Missing token."),
                     deviceId = (args["destinationDeviceId"] as? String)
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() },
+                    certificateFingerprint = (args["certificateFingerprint"] as? String)
                         ?.trim()
                         ?.takeIf { it.isNotEmpty() },
                 )
@@ -719,14 +746,89 @@ class MainActivity : FlutterActivity() {
         path: String,
         method: String,
     ): HttpURLConnection {
-        val url = URL("http", destination.host, destination.port, path)
-        val connection = url.openConnection() as HttpURLConnection
+        val connection = openPinnedConnection(
+            destination.host,
+            destination.port,
+            path,
+            destination.certificateFingerprint,
+        )
         connection.requestMethod = method
         connection.connectTimeout = 15_000
         connection.readTimeout = 120_000
         connection.setRequestProperty("Authorization", "Bearer ${destination.token}")
         connection.setRequestProperty("Accept", "application/json")
         return connection
+    }
+
+
+    private fun openPinnedConnection(
+        host: String,
+        port: Int,
+        path: String,
+        certificateFingerprint: String?,
+    ): HttpURLConnection {
+        val expectedFingerprint = normalizedCertificateFingerprint(certificateFingerprint)
+        val useHttps = expectedFingerprint != null &&
+            expectedFingerprint != DEVELOPMENT_HTTP_FINGERPRINT
+        val connection = URL(if (useHttps) "https" else "http", host, port, path)
+            .openConnection() as HttpURLConnection
+        if (useHttps && connection is HttpsURLConnection) {
+            configurePinnedCertificate(connection, expectedFingerprint!!)
+        }
+        return connection
+    }
+
+    private fun configurePinnedCertificate(
+        connection: HttpsURLConnection,
+        expectedFingerprint: String,
+    ) {
+        val trustManager = object : X509TrustManager {
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+
+            override fun checkClientTrusted(
+                chain: Array<out X509Certificate>?,
+                authType: String?,
+            ) = Unit
+
+            override fun checkServerTrusted(
+                chain: Array<out X509Certificate>?,
+                authType: String?,
+            ) {
+                val certificate = chain?.firstOrNull()
+                    ?: throw CertificateException("The receiver did not present a certificate.")
+                val actual = sha256Fingerprint(certificate)
+                if (actual != expectedFingerprint) {
+                    throw CertificateException("The receiver certificate fingerprint changed.")
+                }
+            }
+        }
+        val sslContext = SSLContext.getInstance("TLS")
+        sslContext.init(null, arrayOf<TrustManager>(trustManager), null)
+        connection.sslSocketFactory = sslContext.socketFactory
+        connection.hostnameVerifier = HostnameVerifier { _, _ -> true }
+    }
+
+    private fun normalizedCertificateFingerprint(value: String?): String? {
+        val trimmed = value
+            ?.trim()
+            ?.lowercase(Locale.US)
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        if (trimmed == DEVELOPMENT_HTTP_FINGERPRINT) {
+            return DEVELOPMENT_HTTP_FINGERPRINT
+        }
+        return trimmed
+            .removePrefix("sha256:")
+            .replace(":", "")
+            .replace(" ", "")
+    }
+
+    private fun sha256Fingerprint(certificate: X509Certificate): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded)
+        return digest.joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
     }
 
     private fun readResponseOrThrow(
@@ -1124,6 +1226,7 @@ class MainActivity : FlutterActivity() {
             port = devicePort(device),
             token = token,
             deviceId = destinationDeviceId,
+            certificateFingerprint = device["certificateFingerprint"] as? String,
         )
     }
 
@@ -1138,6 +1241,7 @@ class MainActivity : FlutterActivity() {
             "localSharedFileId" to file.id,
             "fileName" to file.fileName,
             "destinationDeviceId" to destination.deviceId,
+            "certificateFingerprint" to destination.certificateFingerprint,
             "status" to "pending",
             "bytesTransferred" to 0L,
             "totalBytes" to (file.size ?: 0L),
@@ -1486,6 +1590,7 @@ private const val TRANSFER_HISTORY_KEY = "transfer_history_json"
 private const val TRANSFER_QUEUE_KEY = "transfer_queue_json"
 private const val MOBILE_SETTINGS_KEY = "mobile_settings_json"
 private const val LOCAL_DEVICE_ID_KEY = "local_device_id"
+private const val DEVELOPMENT_HTTP_FINGERPRINT = "development-http"
 private const val MAX_TRANSFER_HISTORY = 50
 private const val MAX_TRANSFER_QUEUE = 50
 private const val MAX_QUEUE_RETRIES = 5
@@ -1520,6 +1625,7 @@ private data class UploadDestination(
     val port: Int,
     val token: String,
     val deviceId: String? = null,
+    val certificateFingerprint: String? = null,
 )
 
 private data class SharedUploadFile(

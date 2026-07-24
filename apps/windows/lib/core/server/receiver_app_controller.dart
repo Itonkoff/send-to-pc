@@ -8,6 +8,7 @@ import 'package:shared_security/shared_security.dart';
 import '../logging/app_logger.dart';
 import '../notifications/windows_notification_service.dart';
 import '../pairing/pairing_coordinator.dart';
+import '../security/tls_certificate_store.dart';
 import '../settings/receiver_settings.dart';
 import '../settings/settings_repository.dart';
 import '../startup/windows_startup_service.dart';
@@ -28,6 +29,7 @@ class ReceiverAppController extends ChangeNotifier {
     required this.notificationService,
     required this.startupService,
     required this.logger,
+    required this.tlsCertificate,
   });
 
   ReceiverSettingsSnapshot settingsSnapshot;
@@ -38,6 +40,7 @@ class ReceiverAppController extends ChangeNotifier {
   final WindowsNotificationService notificationService;
   final WindowsStartupService startupService;
   final AppLogger logger;
+  final ReceiverTlsCertificate tlsCertificate;
 
   late final PairingCoordinator pairingCoordinator;
   late final ReceiverServer server;
@@ -58,6 +61,7 @@ class ReceiverAppController extends ChangeNotifier {
   String get localAddress => _localAddress;
   List<String> get localAddresses => List.unmodifiable(_localAddresses);
   int get listeningPort => server.boundPort ?? settingsSnapshot.appSettings.listenPort;
+  String get endpointScheme => server.isSecure ? 'https' : 'http';
   List<TransferRecord> get records => List.unmodifiable(_records.reversed);
   int get activeTransferCount => _records.where(_isActiveTransfer).length;
   List<PairedDevice> get pairedDevices => trustedDevices.devices;
@@ -89,6 +93,7 @@ class ReceiverAppController extends ChangeNotifier {
     final storage = ReceiveFileStorage(
       receiveFolder: settings.appSettings.receiveFolder,
     );
+    final tlsCertificate = await TlsCertificateStore().ensureReady();
     final controller = ReceiverAppController._(
       settingsSnapshot: settings,
       settingsRepository: settingsRepository,
@@ -98,6 +103,7 @@ class ReceiverAppController extends ChangeNotifier {
       notificationService: WindowsNotificationService(),
       startupService: const WindowsStartupService(),
       logger: AppLogger(),
+      tlsCertificate: tlsCertificate,
     );
 
     final deviceInfo = DeviceInfo(
@@ -115,6 +121,7 @@ class ReceiverAppController extends ChangeNotifier {
       hostAlternativesProvider: () => controller.localAddresses,
       portProvider: () => controller.listeningPort,
       trustedDevices: trustedDevices,
+      certificateFingerprintProvider: () => controller.tlsCertificate.fingerprint,
       onChanged: controller._notifyPairingChanged,
     );
     controller.server = ReceiverServer(
@@ -124,6 +131,7 @@ class ReceiverAppController extends ChangeNotifier {
       trustedDevices: trustedDevices,
       pairingCoordinator: controller.pairingCoordinator,
       transferHistory: transferHistory,
+      securityContextProvider: () => controller.tlsCertificate.context,
       onServerWarning: controller._handleServerWarning,
     );
 
@@ -132,6 +140,7 @@ class ReceiverAppController extends ChangeNotifier {
       data: <String, Object?>{
         'deviceId': settings.deviceId,
         'deviceName': settings.deviceName,
+        'certificateFingerprint': tlsCertificate.fingerprint,
       },
     ));
     return controller;

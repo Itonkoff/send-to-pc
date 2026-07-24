@@ -148,4 +148,48 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+
+  test('pairing payload and approval use receiver certificate fingerprint', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'send_to_pc_pairing_',
+    );
+    try {
+      final repository = PairedDeviceRepository(appDataPath: directory.path);
+      final store = TrustedDeviceStore(
+        await repository.load(),
+        repository: repository,
+      );
+      final coordinator = PairingCoordinator(
+        receiverDeviceId: 'pc-test',
+        receiverDeviceName: 'Test PC',
+        hostProvider: () => '127.0.0.1',
+        portProvider: () => AppConstants.defaultPort,
+        trustedDevices: store,
+        certificateFingerprintProvider: () => 'sha256:test-fingerprint',
+      );
+
+      final session = coordinator.createSession();
+      expect(session.payload.certificateFingerprint, 'sha256:test-fingerprint');
+
+      final responseFuture = coordinator.handlePairingRequest({
+        'protocolVersion': AppConstants.protocolVersion,
+        'pairingToken': session.payload.pairingToken,
+        'deviceId': 'phone-test',
+        'deviceName': 'Test Phone',
+        'platform': 'android',
+      });
+
+      await Future<void>.delayed(Duration.zero);
+      await coordinator.approve(coordinator.requests.single.id);
+      final response = await responseFuture;
+
+      expect(response['certificateFingerprint'], 'sha256:test-fingerprint');
+      expect(
+        store.devices.single.certificateFingerprint,
+        'sha256:test-fingerprint',
+      );
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
 }

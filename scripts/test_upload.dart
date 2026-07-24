@@ -23,6 +23,9 @@ Future<void> main(List<String> args) async {
   final length = await file.length();
   final checksum = await sha256OfFile(file);
   final client = HttpClient();
+  if (options.allowSelfSigned) {
+    client.badCertificateCallback = (_, __, ___) => true;
+  }
 
   try {
     final transfer = await _createTransfer(
@@ -133,14 +136,18 @@ class _UploadOptions {
     required this.host,
     required this.port,
     required this.token,
+    required this.scheme,
+    required this.allowSelfSigned,
   });
 
   final String filePath;
   final String host;
   final int port;
   final String token;
+  final String scheme;
+  final bool allowSelfSigned;
 
-  Uri uri(String path) => Uri(scheme: 'http', host: host, port: port, path: path);
+  Uri uri(String path) => Uri(scheme: scheme, host: host, port: port, path: path);
 
   static _UploadOptions? parse(List<String> args) {
     if (args.isEmpty || args.contains('--help')) {
@@ -151,6 +158,8 @@ class _UploadOptions {
     var host = '127.0.0.1';
     var port = AppConstants.defaultPort;
     var token = Platform.environment['SEND_TO_PC_TOKEN'];
+    var scheme = 'https';
+    var allowSelfSigned = false;
 
     for (var i = 0; i < args.length; i += 1) {
       switch (args[i]) {
@@ -165,6 +174,15 @@ class _UploadOptions {
         case '--token':
           i += 1;
           token = _argAt(args, i) ?? token;
+          break;
+        case '--http':
+          scheme = 'http';
+          break;
+        case '--https':
+          scheme = 'https';
+          break;
+        case '--allow-self-signed':
+          allowSelfSigned = true;
           break;
         default:
           filePath ??= args[i];
@@ -181,6 +199,8 @@ class _UploadOptions {
       host: host,
       port: port,
       token: token,
+      scheme: scheme,
+      allowSelfSigned: allowSelfSigned,
     );
   }
 }
@@ -195,7 +215,8 @@ String? _argAt(List<String> args, int index) {
 void _printUsage() {
   stdout.writeln(
     'Usage: dart scripts/test_upload.dart <file> --token <token> '
-    '[--host 127.0.0.1] [--port 45873]',
+    '[--host 127.0.0.1] [--port 45873] [--https|--http] '
+    '[--allow-self-signed]',
   );
   stdout.writeln('You can also set SEND_TO_PC_TOKEN instead of --token.');
 }

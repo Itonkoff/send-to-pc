@@ -286,6 +286,7 @@ class AndroidShareBridge {
     required String token,
     required List<SharedFile> files,
     String? destinationDeviceId,
+    String? certificateFingerprint,
     bool wifiOnly = false,
   }) async {
     if (files.isEmpty) {
@@ -298,6 +299,7 @@ class AndroidShareBridge {
       'token': token,
       'files': files.map((file) => file.toJson()).toList(growable: false),
       'destinationDeviceId': destinationDeviceId,
+      'certificateFingerprint': certificateFingerprint,
       'wifiOnly': wifiOnly,
     });
   }

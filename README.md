@@ -8,7 +8,7 @@ This checkpoint contains:
 - Kotlin share-intent bridge for `ACTION_SEND` and `ACTION_SEND_MULTIPLE`.
 - Native Android streamed upload bridge for shared content URIs.
 - Flutter Windows app shell with a local receiver dashboard.
-- Authenticated local HTTP API under `/api/v1`.
+- Authenticated local HTTPS API under `/api/v1`.
 - Streamed upload to `.part` files, SHA-256 verification, and safe final filenames.
 - Editable Windows receive folder, listening port, and maximum file size settings.
 - Short-lived pairing sessions with explicit Windows approval.
@@ -21,7 +21,7 @@ This checkpoint contains:
 - Android recent-transfer history persisted from completed receiver responses and failed send attempts.
 - Shared Dart packages for models, protocol errors, security, and storage helpers.
 
-The current implementation covers Phase 1, Phase 2, Android share-target registration and streamed upload from Phase 3, QR-based Android pairing plus trusted-device revocation from Phase 4, a practical trusted-ID discovery refresh from Phase 5, and Windows receiver tray/startup/notification pieces from Phase 7. mDNS advertisement, HTTPS, and richer native notification actions remain next phases.
+The current implementation covers Phase 1, Phase 2, Android share-target registration and streamed upload from Phase 3, QR-based Android pairing plus trusted-device revocation from Phase 4, a practical trusted-ID discovery refresh from Phase 5, HTTPS with certificate fingerprint pinning from Phase 6, and Windows receiver tray/startup/notification pieces from Phase 7. mDNS advertisement and richer native notification actions remain next phases.
 
 ## Project Layout
 
@@ -72,7 +72,7 @@ flutter run -d <android-device-id>
 
 ```powershell
 cd "C:\Users\user\AndroidStudioProjects\Send to pc"
-dart scripts/test_upload.dart C:\path\to\file.pdf --token <token>
+dart scripts/test_upload.dart C:\path\to\file.pdf --token <token> --allow-self-signed
 ```
 
 The receiver writes `<name>.part`, verifies SHA-256 after upload completion, and moves the file into `Downloads\SendToPC`.
@@ -88,7 +88,7 @@ Script-level API check:
 
 ```powershell
 cd "C:\Users\user\AndroidStudioProjects\Send to pc"
-dart scripts/test_pairing_request.dart --token <pairingToken>
+dart scripts/test_pairing_request.dart --token <pairingToken> --allow-self-signed
 ```
 
 5. Approve the pending request in the Windows app.
@@ -109,7 +109,7 @@ Android app check:
 If Android cannot reach the receiver but the Windows app shows `Listening`, check the phone browser first:
 
 ```text
-http://<pc-wifi-ip>:45873/api/v1/device
+https://<pc-wifi-ip>:45873/api/v1/device
 ```
 
 If that does not load, Windows Firewall is probably blocking inbound access. Run PowerShell as Administrator, then run:
@@ -127,4 +127,4 @@ The script removes stale Flutter block prompts for the debug executable and adds
 3. Share a file from Android and choose `Send to PC`.
 4. Select the saved computer, then tap `Send`.
 
-Use the paired-computers discovery button to refresh the saved receiver address. Use the Windows LAN IP shown by the receiver when testing from a physical phone on the same Wi-Fi. If Windows shows `192.168.137.1` but the phone is on a `192.168.1.x` network, pair again with the PC Wi-Fi IPv4 address in `Host override`. Use `10.0.2.2` as the host when testing from the Android emulator against the Windows app on the same development machine.
+After this HTTPS update, re-pair any devices created by older HTTP builds so Android stores the receiver certificate fingerprint. Use the paired-computers discovery button to refresh the saved receiver address. Use the Windows LAN IP shown by the receiver when testing from a physical phone on the same Wi-Fi. If Windows shows `192.168.137.1` but the phone is on a `192.168.1.x` network, pair again with the PC Wi-Fi IPv4 address in `Host override`. Use `10.0.2.2` as the host when testing from the Android emulator against the Windows app on the same development machine.

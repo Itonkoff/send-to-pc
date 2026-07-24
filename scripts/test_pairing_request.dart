@@ -14,6 +14,9 @@ Future<void> main(List<String> args) async {
   }
 
   final client = HttpClient();
+  if (options.allowSelfSigned) {
+    client.badCertificateCallback = (_, __, ___) => true;
+  }
   try {
     final request = await client.postUrl(options.uri(ApiRoutes.pairingRequest));
     request.headers.contentType = ContentType.json;
@@ -46,6 +49,8 @@ class _PairingOptions {
     required this.pairingToken,
     required this.deviceId,
     required this.deviceName,
+    required this.scheme,
+    required this.allowSelfSigned,
   });
 
   final String host;
@@ -53,8 +58,10 @@ class _PairingOptions {
   final String pairingToken;
   final String deviceId;
   final String deviceName;
+  final String scheme;
+  final bool allowSelfSigned;
 
-  Uri uri(String path) => Uri(scheme: 'http', host: host, port: port, path: path);
+  Uri uri(String path) => Uri(scheme: scheme, host: host, port: port, path: path);
 
   static _PairingOptions? parse(List<String> args) {
     if (args.contains('--help')) {
@@ -66,6 +73,8 @@ class _PairingOptions {
     var token = Platform.environment['SEND_TO_PC_PAIRING_TOKEN'];
     var deviceId = 'phone-${randomUuidV4().replaceAll('-', '').substring(0, 8)}';
     var deviceName = 'Test Android Phone';
+    var scheme = 'https';
+    var allowSelfSigned = false;
 
     for (var i = 0; i < args.length; i += 1) {
       switch (args[i]) {
@@ -89,6 +98,15 @@ class _PairingOptions {
           i += 1;
           deviceName = _argAt(args, i) ?? deviceName;
           break;
+        case '--http':
+          scheme = 'http';
+          break;
+        case '--https':
+          scheme = 'https';
+          break;
+        case '--allow-self-signed':
+          allowSelfSigned = true;
+          break;
       }
     }
 
@@ -102,6 +120,8 @@ class _PairingOptions {
       pairingToken: token,
       deviceId: deviceId,
       deviceName: deviceName,
+      scheme: scheme,
+      allowSelfSigned: allowSelfSigned,
     );
   }
 }
@@ -116,7 +136,8 @@ String? _argAt(List<String> args, int index) {
 void _printUsage() {
   stdout.writeln(
     'Usage: dart scripts/test_pairing_request.dart --token <pairingToken> '
-    '[--host 127.0.0.1] [--port 45873]',
+    '[--host 127.0.0.1] [--port 45873] [--https|--http] '
+    '[--allow-self-signed]',
   );
   stdout.writeln('You can also set SEND_TO_PC_PAIRING_TOKEN instead of --token.');
 }

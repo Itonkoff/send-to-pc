@@ -36,4 +36,4 @@ netsh advfirewall firewall add rule `
     program="$AppPath" `
     enable=yes | Out-Host
 
-Write-Host "Done. From the phone, test: http://192.168.1.184:$Port/api/v1/device"
+Write-Host "Done. From the phone, test: https://192.168.1.184:$Port/api/v1/device"

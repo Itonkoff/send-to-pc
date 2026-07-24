@@ -14,9 +14,12 @@ class PairingCoordinator {
     List<String> Function()? hostAlternativesProvider,
     required this.portProvider,
     required this.trustedDevices,
+    String Function()? certificateFingerprintProvider,
     this.onChanged,
-  }) : hostAlternativesProvider =
-            hostAlternativesProvider ?? (() => const <String>[]);
+  })  : hostAlternativesProvider =
+            hostAlternativesProvider ?? (() => const <String>[]),
+        certificateFingerprintProvider =
+            certificateFingerprintProvider ?? (() => 'development-http');
 
   final String receiverDeviceId;
   final String receiverDeviceName;
@@ -24,6 +27,7 @@ class PairingCoordinator {
   final List<String> Function() hostAlternativesProvider;
   final int Function() portProvider;
   final TrustedDeviceStore trustedDevices;
+  final String Function() certificateFingerprintProvider;
   final void Function()? onChanged;
 
   PairingSessionSnapshot? _activeSession;
@@ -62,7 +66,7 @@ class PairingCoordinator {
         hostAlternatives: hostAlternatives,
         port: portProvider(),
         pairingToken: secureToken(),
-        certificateFingerprint: 'development-http',
+        certificateFingerprint: certificateFingerprintProvider(),
         expiresAt: now.add(const Duration(minutes: 5)),
       ),
       createdAt: now,
@@ -156,7 +160,7 @@ class PairingCoordinator {
       deviceId: request.deviceId,
       deviceName: request.deviceName,
       platform: request.platform,
-      certificateFingerprint: 'development-http',
+      certificateFingerprint: certificateFingerprintProvider(),
       lastKnownAddress: request.remoteAddress,
     );
     _replaceRequest(request.copyWith(status: PairingRequestStatus.approved));
